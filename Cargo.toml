@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/emulator-core",
+    "crates/emulator-stack-viewer",
+    "crates/emulator-gui",
+]
+resolver = "2"

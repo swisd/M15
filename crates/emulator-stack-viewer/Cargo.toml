@@ -1,0 +1,20 @@
+[package]
+name = "emulator-stack-viewer"
+version = "0.1.0"
+edition = "2024"
+authors = ["M15 Developers"]
+description = "Universal architecture-aware stack viewer and frame inspector for CPU emulators"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["std", "egui"]
+std = ["alloc", "emulator-core/std"]
+alloc = ["emulator-core/alloc"]
+egui = ["dep:egui", "alloc"]
+
+[dependencies]
+emulator-core = { path = "../emulator-core", default-features = false, features = ["all-arch"] }
+egui = { version = "0.31", optional = true }
+
+[dev-dependencies]
+emulator-core = { path = "../emulator-core", features = ["all-arch", "std"] }

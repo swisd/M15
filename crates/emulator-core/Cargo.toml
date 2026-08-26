@@ -1,0 +1,51 @@
+[package]
+name = "emulator-core"
+version = "0.1.0"
+edition = "2024"
+authors = ["M15 Developers"]
+description = "no_std multi-architecture CPU emulator core supporting 15 architectures"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["std", "all-arch"]
+std = ["alloc"]
+alloc = []
+
+# Architecture feature flags
+all-arch = [
+    "arch-8086",
+    "arch-x86",
+    "arch-x86_64",
+    "arch-arm32",
+    "arch-arm64",
+    "arch-riscv",
+    "arch-ia64",
+    "arch-mips",
+    "arch-powerpc",
+    "arch-sparc",
+    "arch-avr",
+    "arch-superh",
+    "arch-parisc",
+    "arch-alpha",
+    "arch-m68k",
+    "arch-6502",
+]
+
+arch-8086 = []
+arch-x86 = []
+arch-x86_64 = []
+arch-arm32 = []
+arch-arm64 = []
+arch-riscv = []
+arch-ia64 = []
+arch-mips = []
+arch-powerpc = []
+arch-sparc = []
+arch-avr = []
+arch-superh = []
+arch-parisc = []
+arch-alpha = []
+arch-m68k = []
+arch-6502 = []
+
+[dependencies]

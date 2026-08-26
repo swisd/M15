@@ -1,0 +1,7 @@
+[project]
+name = "My Assembly Project"
+arch = "avr"       # e.g. 8086, risc-v, avr, 6502, x86_64, arm32, arm64, etc.
+entry_point = "0x0000"
+sp = "0xFFF8"
+main = "main.asm"   # primary source file
+files = ["main.asm"]
