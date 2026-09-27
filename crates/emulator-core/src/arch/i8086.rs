@@ -392,6 +392,176 @@ impl I8086Cpu {
         if of { f |= flags::OF; }
         self.state.flags = f | 0x0002; // Bit 1 is always set
     }
+
+    fn shift_u8(&mut self, val: u8, count: u8, op: u8) -> u8 {
+        if count == 0 {
+            return val;
+        }
+        let mut res = val;
+        let mut cf = (self.state.flags & flags::CF) != 0;
+        let mut of = false;
+
+        for _ in 0..count {
+            match op {
+                0 => {
+                    // ROL
+                    let bit7 = (res & 0x80) != 0;
+                    res = (res << 1) | if bit7 { 1 } else { 0 };
+                    cf = bit7;
+                    of = ((res & 0x80) != 0) ^ cf;
+                }
+                1 => {
+                    // ROR
+                    let bit0 = (res & 0x01) != 0;
+                    res = (res >> 1) | if bit0 { 0x80 } else { 0 };
+                    cf = bit0;
+                    of = ((res & 0x80) != 0) ^ ((res & 0x40) != 0);
+                }
+                2 => {
+                    // RCL
+                    let old_cf = if cf { 1 } else { 0 };
+                    let bit7 = (res & 0x80) != 0;
+                    res = (res << 1) | old_cf;
+                    cf = bit7;
+                    of = ((res & 0x80) != 0) ^ cf;
+                }
+                3 => {
+                    // RCR
+                    let old_cf = if cf { 0x80 } else { 0 };
+                    let bit0 = (res & 0x01) != 0;
+                    res = (res >> 1) | old_cf;
+                    cf = bit0;
+                    of = ((res & 0x80) != 0) ^ ((res & 0x40) != 0);
+                }
+                4 => {
+                    // SHL / SAL
+                    let bit7 = (res & 0x80) != 0;
+                    res <<= 1;
+                    cf = bit7;
+                    of = ((res & 0x80) != 0) ^ cf;
+                }
+                5 => {
+                    // SHR
+                    let bit0 = (res & 0x01) != 0;
+                    let bit7 = (res & 0x80) != 0;
+                    res >>= 1;
+                    cf = bit0;
+                    of = bit7;
+                }
+                7 => {
+                    // SAR
+                    let bit0 = (res & 0x01) != 0;
+                    let msb = res & 0x80;
+                    res = (res >> 1) | msb;
+                    cf = bit0;
+                    of = false;
+                }
+                _ => {}
+            }
+        }
+
+        if op >= 4 {
+            let zf = res == 0;
+            let sf = (res & 0x80) != 0;
+            let pf = I8086State::parity(res);
+            self.set_flags(cf, pf, (self.state.flags & flags::AF) != 0, zf, sf, of);
+        } else {
+            let mut f = self.state.flags & !flags::CF;
+            if cf { f |= flags::CF; }
+            if count == 1 {
+                f &= !flags::OF;
+                if of { f |= flags::OF; }
+            }
+            self.state.flags = f | 0x0002;
+        }
+
+        res
+    }
+
+    fn shift_u16(&mut self, val: u16, count: u8, op: u8) -> u16 {
+        if count == 0 {
+            return val;
+        }
+        let mut res = val;
+        let mut cf = (self.state.flags & flags::CF) != 0;
+        let mut of = false;
+
+        for _ in 0..count {
+            match op {
+                0 => {
+                    // ROL
+                    let bit15 = (res & 0x8000) != 0;
+                    res = (res << 1) | if bit15 { 1 } else { 0 };
+                    cf = bit15;
+                    of = ((res & 0x8000) != 0) ^ cf;
+                }
+                1 => {
+                    // ROR
+                    let bit0 = (res & 0x0001) != 0;
+                    res = (res >> 1) | if bit0 { 0x8000 } else { 0 };
+                    cf = bit0;
+                    of = ((res & 0x8000) != 0) ^ ((res & 0x4000) != 0);
+                }
+                2 => {
+                    // RCL
+                    let old_cf = if cf { 1 } else { 0 };
+                    let bit15 = (res & 0x8000) != 0;
+                    res = (res << 1) | old_cf;
+                    cf = bit15;
+                    of = ((res & 0x8000) != 0) ^ cf;
+                }
+                3 => {
+                    // RCR
+                    let old_cf = if cf { 0x8000 } else { 0 };
+                    let bit0 = (res & 0x0001) != 0;
+                    res = (res >> 1) | old_cf;
+                    cf = bit0;
+                    of = ((res & 0x8000) != 0) ^ ((res & 0x4000) != 0);
+                }
+                4 => {
+                    // SHL / SAL
+                    let bit15 = (res & 0x8000) != 0;
+                    res <<= 1;
+                    cf = bit15;
+                    of = ((res & 0x8000) != 0) ^ cf;
+                }
+                5 => {
+                    // SHR
+                    let bit0 = (res & 0x0001) != 0;
+                    let bit15 = (res & 0x8000) != 0;
+                    res >>= 1;
+                    cf = bit0;
+                    of = bit15;
+                }
+                7 => {
+                    // SAR
+                    let bit0 = (res & 0x0001) != 0;
+                    let msb = res & 0x8000;
+                    res = (res >> 1) | msb;
+                    cf = bit0;
+                    of = false;
+                }
+                _ => {}
+            }
+        }
+
+        if op >= 4 {
+            let zf = res == 0;
+            let sf = (res & 0x8000) != 0;
+            let pf = I8086State::parity((res & 0xFF) as u8);
+            self.set_flags(cf, pf, (self.state.flags & flags::AF) != 0, zf, sf, of);
+        } else {
+            let mut f = self.state.flags & !flags::CF;
+            if cf { f |= flags::CF; }
+            if count == 1 {
+                f &= !flags::OF;
+                if of { f |= flags::OF; }
+            }
+            self.state.flags = f | 0x0002;
+        }
+
+        res
+    }
 }
 
 impl CpuEngine for I8086Cpu {
@@ -455,15 +625,18 @@ impl CpuEngine for I8086Cpu {
         }
 
         let mut seg_override = None;
+        let mut rep_prefix = None;
         let mut opcode = self.fetch_u8(bus)?;
 
-        // Handle segment prefix overrides
+        // Handle segment prefix overrides, REP prefixes, and LOCK prefix
         loop {
             match opcode {
                 0x26 => { seg_override = Some(self.state.es); opcode = self.fetch_u8(bus)?; }
                 0x2E => { seg_override = Some(self.state.cs); opcode = self.fetch_u8(bus)?; }
                 0x36 => { seg_override = Some(self.state.ss); opcode = self.fetch_u8(bus)?; }
                 0x3E => { seg_override = Some(self.state.ds); opcode = self.fetch_u8(bus)?; }
+                0xF2 | 0xF3 => { rep_prefix = Some(opcode); opcode = self.fetch_u8(bus)?; }
+                0xF0 => { opcode = self.fetch_u8(bus)?; } // LOCK
                 _ => break,
             }
         }
@@ -477,6 +650,9 @@ impl CpuEngine for I8086Cpu {
                 self.state.halted = true;
                 Ok(StepOutcome::Halted)
             }
+
+            // WAIT
+            0x9B => Ok(StepOutcome::Continue { cycles: 4 }),
 
             // INT 3
             0xCC => Ok(StepOutcome::Breakpoint),
@@ -495,6 +671,25 @@ impl CpuEngine for I8086Cpu {
                     self.state.cs = new_cs;
                 }
                 Ok(StepOutcome::Interrupt(int_num as u32))
+            }
+
+            // INTO
+            0xCE => {
+                if (self.state.flags & flags::OF) != 0 {
+                    self.push_u16(bus, self.state.flags)?;
+                    self.push_u16(bus, self.state.cs)?;
+                    self.push_u16(bus, self.state.ip)?;
+                    let ivt_addr = 4 * 4;
+                    let new_ip = bus.read_u16(ivt_addr, Endianness::LittleEndian)?;
+                    let new_cs = bus.read_u16(ivt_addr + 2, Endianness::LittleEndian)?;
+                    if new_ip != 0 || new_cs != 0 {
+                        self.state.ip = new_ip;
+                        self.state.cs = new_cs;
+                    }
+                    Ok(StepOutcome::Interrupt(4))
+                } else {
+                    Ok(StepOutcome::Continue { cycles: 4 })
+                }
             }
 
             // IRET
@@ -533,6 +728,14 @@ impl CpuEngine for I8086Cpu {
             // PUSHF / POPF
             0x9C => { let f = self.state.flags; self.push_u16(bus, f)?; Ok(StepOutcome::Continue { cycles: 10 }) }
             0x9D => { self.state.flags = self.pop_u16(bus)? | 0x0002; Ok(StepOutcome::Continue { cycles: 8 }) }
+
+            // POP rm16 (0x8F /0)
+            0x8F => {
+                let (ea, _) = self.decode_modrm(bus, seg_override)?;
+                let val = self.pop_u16(bus)?;
+                self.write_ea_u16(bus, ea, val)?;
+                Ok(StepOutcome::Continue { cycles: 17 })
+            }
 
             // MOV imm8 -> reg8 (0xB0..0xB7)
             0xB0..=0xB7 => {
@@ -606,6 +809,39 @@ impl CpuEngine for I8086Cpu {
                 Ok(StepOutcome::Continue { cycles: 10 })
             }
 
+            // MOV AL/AX <-> [moffs] (0xA0..0xA3)
+            0xA0 => {
+                let off = self.fetch_u16(bus)?;
+                let seg = seg_override.unwrap_or(self.state.ds);
+                let addr = I8086State::linear_address(seg, off) as u64;
+                let val = bus.read_u8(addr)?;
+                self.set_reg8(0, val);
+                Ok(StepOutcome::Continue { cycles: 10 })
+            }
+            0xA1 => {
+                let off = self.fetch_u16(bus)?;
+                let seg = seg_override.unwrap_or(self.state.ds);
+                let addr = I8086State::linear_address(seg, off) as u64;
+                let val = bus.read_u16(addr, Endianness::LittleEndian)?;
+                self.state.ax = val;
+                Ok(StepOutcome::Continue { cycles: 10 })
+            }
+            0xA2 => {
+                let off = self.fetch_u16(bus)?;
+                let seg = seg_override.unwrap_or(self.state.ds);
+                let addr = I8086State::linear_address(seg, off) as u64;
+                let val = (self.state.ax & 0xFF) as u8;
+                bus.write_u8(addr, val)?;
+                Ok(StepOutcome::Continue { cycles: 10 })
+            }
+            0xA3 => {
+                let off = self.fetch_u16(bus)?;
+                let seg = seg_override.unwrap_or(self.state.ds);
+                let addr = I8086State::linear_address(seg, off) as u64;
+                bus.write_u16(addr, self.state.ax, Endianness::LittleEndian)?;
+                Ok(StepOutcome::Continue { cycles: 10 })
+            }
+
             // LEA r16, m16 (0x8D)
             0x8D => {
                 let (ea, reg) = self.decode_modrm(bus, seg_override)?;
@@ -615,6 +851,40 @@ impl CpuEngine for I8086Cpu {
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
 
+            // LES / LDS (0xC4, 0xC5)
+            0xC4 => {
+                let (ea, reg) = self.decode_modrm(bus, seg_override)?;
+                if let EffectiveAddress::Memory { seg, offset } = ea {
+                    let addr = I8086State::linear_address(seg, offset) as u64;
+                    let off_val = bus.read_u16(addr, Endianness::LittleEndian)?;
+                    let seg_val = bus.read_u16(addr + 2, Endianness::LittleEndian)?;
+                    self.set_reg16(reg, off_val);
+                    self.state.es = seg_val;
+                }
+                Ok(StepOutcome::Continue { cycles: 16 })
+            }
+            0xC5 => {
+                let (ea, reg) = self.decode_modrm(bus, seg_override)?;
+                if let EffectiveAddress::Memory { seg, offset } = ea {
+                    let addr = I8086State::linear_address(seg, offset) as u64;
+                    let off_val = bus.read_u16(addr, Endianness::LittleEndian)?;
+                    let seg_val = bus.read_u16(addr + 2, Endianness::LittleEndian)?;
+                    self.set_reg16(reg, off_val);
+                    self.state.ds = seg_val;
+                }
+                Ok(StepOutcome::Continue { cycles: 16 })
+            }
+
+            // XLAT (0xD7)
+            0xD7 => {
+                let seg = seg_override.unwrap_or(self.state.ds);
+                let off = self.state.bx.wrapping_add(self.state.ax & 0xFF);
+                let addr = I8086State::linear_address(seg, off) as u64;
+                let val = bus.read_u8(addr)?;
+                self.set_reg8(0, val);
+                Ok(StepOutcome::Continue { cycles: 11 })
+            }
+
             // XCHG AX, r16 (0x91..0x97)
             0x91..=0x97 => {
                 let reg = opcode - 0x90;
@@ -622,6 +892,54 @@ impl CpuEngine for I8086Cpu {
                 self.state.ax = self.get_reg16(reg);
                 self.set_reg16(reg, tmp);
                 Ok(StepOutcome::Continue { cycles: 3 })
+            }
+
+            // XCHG rm8/16 <-> r8/16 (0x86, 0x87)
+            0x86 => {
+                let (ea, reg) = self.decode_modrm(bus, seg_override)?;
+                let v1 = self.get_reg8(reg);
+                let v2 = self.read_ea_u8(bus, ea)?;
+                self.set_reg8(reg, v2);
+                self.write_ea_u8(bus, ea, v1)?;
+                Ok(StepOutcome::Continue { cycles: 17 })
+            }
+            0x87 => {
+                let (ea, reg) = self.decode_modrm(bus, seg_override)?;
+                let v1 = self.get_reg16(reg);
+                let v2 = self.read_ea_u16(bus, ea)?;
+                self.set_reg16(reg, v2);
+                self.write_ea_u16(bus, ea, v1)?;
+                Ok(StepOutcome::Continue { cycles: 17 })
+            }
+
+            // TEST r/m, r (0x84, 0x85)
+            0x84 => {
+                let (ea, reg) = self.decode_modrm(bus, seg_override)?;
+                let v1 = self.read_ea_u8(bus, ea)?;
+                let v2 = self.get_reg8(reg);
+                self.alu_and_u8(v1, v2);
+                Ok(StepOutcome::Continue { cycles: 9 })
+            }
+            0x85 => {
+                let (ea, reg) = self.decode_modrm(bus, seg_override)?;
+                let v1 = self.read_ea_u16(bus, ea)?;
+                let v2 = self.get_reg16(reg);
+                self.alu_and_u16(v1, v2);
+                Ok(StepOutcome::Continue { cycles: 9 })
+            }
+
+            // TEST AL/AX, imm (0xA8, 0xA9)
+            0xA8 => {
+                let imm = self.fetch_u8(bus)?;
+                let val = (self.state.ax & 0xFF) as u8;
+                self.alu_and_u8(val, imm);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0xA9 => {
+                let imm = self.fetch_u16(bus)?;
+                let val = self.state.ax;
+                self.alu_and_u16(val, imm);
+                Ok(StepOutcome::Continue { cycles: 4 })
             }
 
             // INC / DEC reg16 (0x40..0x4F)
@@ -642,6 +960,86 @@ impl CpuEngine for I8086Cpu {
                 if cf { self.state.flags |= flags::CF; } else { self.state.flags &= !flags::CF; }
                 self.set_reg16(reg, res);
                 Ok(StepOutcome::Continue { cycles: 2 })
+            }
+
+            // BCD / Decimal Adjust Instructions (0x27, 0x2F, 0x37, 0x3F)
+            0x27 => {
+                // DAA
+                let mut al = (self.state.ax & 0xFF) as u8;
+                let old_al = al;
+                let mut cf = (self.state.flags & flags::CF) != 0;
+                let mut af = (self.state.flags & flags::AF) != 0;
+
+                if (al & 0x0F) > 9 || af {
+                    al = al.wrapping_add(6);
+                    af = true;
+                }
+                if old_al > 0x99 || cf {
+                    al = al.wrapping_add(0x60);
+                    cf = true;
+                }
+                self.set_reg8(0, al);
+                let zf = al == 0;
+                let sf = (al & 0x80) != 0;
+                let pf = I8086State::parity(al);
+                self.set_flags(cf, pf, af, zf, sf, (self.state.flags & flags::OF) != 0);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x2F => {
+                // DAS
+                let mut al = (self.state.ax & 0xFF) as u8;
+                let old_al = al;
+                let mut cf = (self.state.flags & flags::CF) != 0;
+                let mut af = (self.state.flags & flags::AF) != 0;
+
+                if (al & 0x0F) > 9 || af {
+                    al = al.wrapping_sub(6);
+                    af = true;
+                }
+                if old_al > 0x99 || cf {
+                    al = al.wrapping_sub(0x60);
+                    cf = true;
+                }
+                self.set_reg8(0, al);
+                let zf = al == 0;
+                let sf = (al & 0x80) != 0;
+                let pf = I8086State::parity(al);
+                self.set_flags(cf, pf, af, zf, sf, (self.state.flags & flags::OF) != 0);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x37 => {
+                // AAA
+                let mut al = (self.state.ax & 0xFF) as u8;
+                let mut ah = (self.state.ax >> 8) as u8;
+                let af = (self.state.flags & flags::AF) != 0;
+
+                if (al & 0x0F) > 9 || af {
+                    al = al.wrapping_add(6) & 0x0F;
+                    ah = ah.wrapping_add(1);
+                    self.state.flags |= flags::AF | flags::CF;
+                } else {
+                    al &= 0x0F;
+                    self.state.flags &= !(flags::AF | flags::CF);
+                }
+                self.state.ax = ((ah as u16) << 8) | (al as u16);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x3F => {
+                // AAS
+                let mut al = (self.state.ax & 0xFF) as u8;
+                let mut ah = (self.state.ax >> 8) as u8;
+                let af = (self.state.flags & flags::AF) != 0;
+
+                if (al & 0x0F) > 9 || af {
+                    al = al.wrapping_sub(6) & 0x0F;
+                    ah = ah.wrapping_sub(1);
+                    self.state.flags |= flags::AF | flags::CF;
+                } else {
+                    al &= 0x0F;
+                    self.state.flags &= !(flags::AF | flags::CF);
+                }
+                self.state.ax = ((ah as u16) << 8) | (al as u16);
+                Ok(StepOutcome::Continue { cycles: 4 })
             }
 
             // ADD / OR / ADC / SBB / AND / SUB / XOR / CMP (0x00..0x3F)
@@ -766,6 +1164,190 @@ impl CpuEngine for I8086Cpu {
                 Ok(StepOutcome::Continue { cycles: 4 })
             }
 
+            // Group 2: Shifts & Rotates (0xD0..0xD3)
+            0xD0..=0xD3 => {
+                let (ea, op) = self.decode_modrm(bus, seg_override)?;
+                let is_16 = (opcode & 1) != 0;
+                let count = if (opcode & 2) != 0 { (self.state.cx & 0xFF) as u8 } else { 1 };
+
+                if is_16 {
+                    let val = self.read_ea_u16(bus, ea)?;
+                    let res = self.shift_u16(val, count, op);
+                    self.write_ea_u16(bus, ea, res)?;
+                } else {
+                    let val = self.read_ea_u8(bus, ea)?;
+                    let res = self.shift_u8(val, count, op);
+                    self.write_ea_u8(bus, ea, res)?;
+                }
+                Ok(StepOutcome::Continue { cycles: 8 })
+            }
+
+            // Group 3: NOT / NEG / MUL / IMUL / DIV / IDIV / TEST (0xF6, 0xF7)
+            0xF6 | 0xF7 => {
+                let (ea, op) = self.decode_modrm(bus, seg_override)?;
+                let is_16 = (opcode & 1) != 0;
+
+                if is_16 {
+                    let val = self.read_ea_u16(bus, ea)?;
+                    match op {
+                        0 => {
+                            // TEST rm16, imm16
+                            let imm = self.fetch_u16(bus)?;
+                            self.alu_and_u16(val, imm);
+                        }
+                        2 => {
+                            // NOT rm16
+                            self.write_ea_u16(bus, ea, !val)?;
+                        }
+                        3 => {
+                            // NEG rm16
+                            let res = self.alu_sub_u16(0, val, false);
+                            self.write_ea_u16(bus, ea, res)?;
+                        }
+                        4 => {
+                            // MUL rm16 (AX * rm16 -> DX:AX)
+                            let prod = (self.state.ax as u32) * (val as u32);
+                            self.state.ax = (prod & 0xFFFF) as u16;
+                            self.state.dx = (prod >> 16) as u16;
+                            let has_hi = self.state.dx != 0;
+                            if has_hi {
+                                self.state.flags |= flags::CF | flags::OF;
+                            } else {
+                                self.state.flags &= !(flags::CF | flags::OF);
+                            }
+                        }
+                        5 => {
+                            // IMUL rm16 (signed AX * rm16 -> DX:AX)
+                            let prod = (self.state.ax as i16 as i32) * (val as i16 as i32);
+                            self.state.ax = (prod as u32 & 0xFFFF) as u16;
+                            self.state.dx = ((prod as u32) >> 16) as u16;
+                            let has_hi = (prod >> 15) != 0 && (prod >> 15) != -1;
+                            if has_hi {
+                                self.state.flags |= flags::CF | flags::OF;
+                            } else {
+                                self.state.flags &= !(flags::CF | flags::OF);
+                            }
+                        }
+                        6 => {
+                            // DIV rm16 (DX:AX / rm16 -> AX=quot, DX=rem)
+                            if val == 0 {
+                                return Ok(StepOutcome::Interrupt(0)); // Divide error
+                            }
+                            let num = ((self.state.dx as u32) << 16) | (self.state.ax as u32);
+                            let quot = num / (val as u32);
+                            let rem = num % (val as u32);
+                            if quot > 0xFFFF {
+                                return Ok(StepOutcome::Interrupt(0));
+                            }
+                            self.state.ax = quot as u16;
+                            self.state.dx = rem as u16;
+                        }
+                        7 => {
+                            // IDIV rm16 (signed DX:AX / rm16 -> AX=quot, DX=rem)
+                            if val == 0 {
+                                return Ok(StepOutcome::Interrupt(0));
+                            }
+                            let num = (((self.state.dx as u32) << 16) | (self.state.ax as u32)) as i32;
+                            let d = val as i16 as i32;
+                            let quot = num / d;
+                            let rem = num % d;
+                            if !(-32768..=32767).contains(&quot) {
+                                return Ok(StepOutcome::Interrupt(0));
+                            }
+                            self.state.ax = (quot as i16) as u16;
+                            self.state.dx = (rem as i16) as u16;
+                        }
+                        _ => return Err(CpuError::InvalidInstruction { opcode: opcode as u64, pc: self.pc() }),
+                    }
+                } else {
+                    let val = self.read_ea_u8(bus, ea)?;
+                    match op {
+                        0 => {
+                            // TEST rm8, imm8
+                            let imm = self.fetch_u8(bus)?;
+                            self.alu_and_u8(val, imm);
+                        }
+                        2 => {
+                            // NOT rm8
+                            self.write_ea_u8(bus, ea, !val)?;
+                        }
+                        3 => {
+                            // NEG rm8
+                            let res = self.alu_sub_u8(0, val, false);
+                            self.write_ea_u8(bus, ea, res)?;
+                        }
+                        4 => {
+                            // MUL rm8 (AL * rm8 -> AX)
+                            let al = (self.state.ax & 0xFF) as u8;
+                            let prod = (al as u16) * (val as u16);
+                            self.state.ax = prod;
+                            let has_hi = (prod & 0xFF00) != 0;
+                            if has_hi {
+                                self.state.flags |= flags::CF | flags::OF;
+                            } else {
+                                self.state.flags &= !(flags::CF | flags::OF);
+                            }
+                        }
+                        5 => {
+                            // IMUL rm8 (signed AL * rm8 -> AX)
+                            let al = (self.state.ax & 0xFF) as u8 as i8;
+                            let prod = (al as i16) * (val as i8 as i16);
+                            self.state.ax = prod as u16;
+                            let has_hi = (prod >> 7) != 0 && (prod >> 7) != -1;
+                            if has_hi {
+                                self.state.flags |= flags::CF | flags::OF;
+                            } else {
+                                self.state.flags &= !(flags::CF | flags::OF);
+                            }
+                        }
+                        6 => {
+                            // DIV rm8 (AX / rm8 -> AL=quot, AH=rem)
+                            if val == 0 {
+                                return Ok(StepOutcome::Interrupt(0));
+                            }
+                            let num = self.state.ax;
+                            let quot = num / (val as u16);
+                            let rem = num % (val as u16);
+                            if quot > 0xFF {
+                                return Ok(StepOutcome::Interrupt(0));
+                            }
+                            self.state.ax = ((rem & 0xFF) << 8) | (quot & 0xFF);
+                        }
+                        7 => {
+                            // IDIV rm8 (signed AX / rm8 -> AL=quot, AH=rem)
+                            if val == 0 {
+                                return Ok(StepOutcome::Interrupt(0));
+                            }
+                            let num = self.state.ax as i16;
+                            let d = val as i8 as i16;
+                            let quot = num / d;
+                            let rem = num % d;
+                            if !(-128..=127).contains(&quot) {
+                                return Ok(StepOutcome::Interrupt(0));
+                            }
+                            self.state.ax = (((rem as u16) & 0xFF) << 8) | ((quot as u16) & 0xFF);
+                        }
+                        _ => return Err(CpuError::InvalidInstruction { opcode: opcode as u64, pc: self.pc() }),
+                    }
+                }
+                Ok(StepOutcome::Continue { cycles: 12 })
+            }
+
+            // Group 4: INC / DEC rm8 (0xFE)
+            0xFE => {
+                let (ea, op) = self.decode_modrm(bus, seg_override)?;
+                let val = self.read_ea_u8(bus, ea)?;
+                let cf = (self.state.flags & flags::CF) != 0;
+                let res = match op {
+                    0 => self.alu_add_u8(val, 1, false),
+                    1 => self.alu_sub_u8(val, 1, false),
+                    _ => return Err(CpuError::InvalidInstruction { opcode: 0xFE, pc: self.pc() }),
+                };
+                if cf { self.state.flags |= flags::CF; } else { self.state.flags &= !flags::CF; }
+                self.write_ea_u8(bus, ea, res)?;
+                Ok(StepOutcome::Continue { cycles: 15 })
+            }
+
             // Group 5: INC/DEC/CALL/JMP/PUSH rm16 (0xFF)
             0xFF => {
                 let (ea, op) = self.decode_modrm(bus, seg_override)?;
@@ -796,11 +1378,41 @@ impl CpuEngine for I8086Cpu {
                         self.state.ip = target;
                         Ok(StepOutcome::Continue { cycles: 16 })
                     }
+                    3 => {
+                        // CALL far indirect (m16:16)
+                        if let EffectiveAddress::Memory { seg, offset } = ea {
+                            let addr = I8086State::linear_address(seg, offset) as u64;
+                            let target_ip = bus.read_u16(addr, Endianness::LittleEndian)?;
+                            let target_cs = bus.read_u16(addr + 2, Endianness::LittleEndian)?;
+                            let cs = self.state.cs;
+                            let ip = self.state.ip;
+                            self.push_u16(bus, cs)?;
+                            self.push_u16(bus, ip)?;
+                            self.state.cs = target_cs;
+                            self.state.ip = target_ip;
+                            Ok(StepOutcome::Continue { cycles: 37 })
+                        } else {
+                            Err(CpuError::InvalidInstruction { opcode: 0xFF, pc: self.pc() })
+                        }
+                    }
                     4 => {
                         // JMP near indirect
                         let target = self.read_ea_u16(bus, ea)?;
                         self.state.ip = target;
                         Ok(StepOutcome::Continue { cycles: 11 })
+                    }
+                    5 => {
+                        // JMP far indirect (m16:16)
+                        if let EffectiveAddress::Memory { seg, offset } = ea {
+                            let addr = I8086State::linear_address(seg, offset) as u64;
+                            let target_ip = bus.read_u16(addr, Endianness::LittleEndian)?;
+                            let target_cs = bus.read_u16(addr + 2, Endianness::LittleEndian)?;
+                            self.state.cs = target_cs;
+                            self.state.ip = target_ip;
+                            Ok(StepOutcome::Continue { cycles: 24 })
+                        } else {
+                            Err(CpuError::InvalidInstruction { opcode: 0xFF, pc: self.pc() })
+                        }
                     }
                     6 => {
                         // PUSH rm16
@@ -810,6 +1422,40 @@ impl CpuEngine for I8086Cpu {
                     }
                     _ => Err(CpuError::InvalidInstruction { opcode: 0xFF, pc: self.pc() }),
                 }
+            }
+
+            // Far JMP & CALL (0xEA, 0x9A)
+            0xEA => {
+                let target_ip = self.fetch_u16(bus)?;
+                let target_cs = self.fetch_u16(bus)?;
+                self.state.cs = target_cs;
+                self.state.ip = target_ip;
+                Ok(StepOutcome::Continue { cycles: 15 })
+            }
+            0x9A => {
+                let target_ip = self.fetch_u16(bus)?;
+                let target_cs = self.fetch_u16(bus)?;
+                let cs = self.state.cs;
+                let ip = self.state.ip;
+                self.push_u16(bus, cs)?;
+                self.push_u16(bus, ip)?;
+                self.state.cs = target_cs;
+                self.state.ip = target_ip;
+                Ok(StepOutcome::Continue { cycles: 28 })
+            }
+
+            // Far RET (0xCB, 0xCA)
+            0xCB => {
+                self.state.ip = self.pop_u16(bus)?;
+                self.state.cs = self.pop_u16(bus)?;
+                Ok(StepOutcome::Continue { cycles: 18 })
+            }
+            0xCA => {
+                let pop_bytes = self.fetch_u16(bus)?;
+                self.state.ip = self.pop_u16(bus)?;
+                self.state.cs = self.pop_u16(bus)?;
+                self.state.sp = self.state.sp.wrapping_add(pop_bytes);
+                Ok(StepOutcome::Continue { cycles: 17 })
             }
 
             // Control flow: JMP rel8 / rel16
@@ -873,6 +1519,280 @@ impl CpuEngine for I8086Cpu {
                     self.state.ip = (self.state.ip as i16).wrapping_add(rel as i16) as u16;
                 }
                 Ok(StepOutcome::Continue { cycles: if take { 16 } else { 4 } })
+            }
+
+            // LOOP / LOOPE / LOOPNE / JCXZ (0xE0..0xE3)
+            0xE0 => {
+                // LOOPNE / LOOPNZ
+                let rel = self.fetch_u8(bus)? as i8;
+                self.state.cx = self.state.cx.wrapping_sub(1);
+                if self.state.cx != 0 && (self.state.flags & flags::ZF) == 0 {
+                    self.state.ip = (self.state.ip as i16).wrapping_add(rel as i16) as u16;
+                }
+                Ok(StepOutcome::Continue { cycles: 17 })
+            }
+            0xE1 => {
+                // LOOPE / LOOPZ
+                let rel = self.fetch_u8(bus)? as i8;
+                self.state.cx = self.state.cx.wrapping_sub(1);
+                if self.state.cx != 0 && (self.state.flags & flags::ZF) != 0 {
+                    self.state.ip = (self.state.ip as i16).wrapping_add(rel as i16) as u16;
+                }
+                Ok(StepOutcome::Continue { cycles: 17 })
+            }
+            0xE2 => {
+                // LOOP
+                let rel = self.fetch_u8(bus)? as i8;
+                self.state.cx = self.state.cx.wrapping_sub(1);
+                if self.state.cx != 0 {
+                    self.state.ip = (self.state.ip as i16).wrapping_add(rel as i16) as u16;
+                }
+                Ok(StepOutcome::Continue { cycles: 17 })
+            }
+            0xE3 => {
+                // JCXZ
+                let rel = self.fetch_u8(bus)? as i8;
+                if self.state.cx == 0 {
+                    self.state.ip = (self.state.ip as i16).wrapping_add(rel as i16) as u16;
+                }
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+
+            // String Operations (MOVS, CMPS, STOS, LODS, SCAS)
+            0xA4 | 0xA5 => {
+                // MOVSB / MOVSW
+                let is_16 = opcode == 0xA5;
+                let step = if (self.state.flags & flags::DF) != 0 { if is_16 { -2i16 } else { -1i16 } } else { if is_16 { 2i16 } else { 1i16 } };
+                let seg_src = seg_override.unwrap_or(self.state.ds);
+                let seg_dst = self.state.es;
+
+                let repeat_count = match rep_prefix {
+                    Some(_) => self.state.cx,
+                    None => 1,
+                };
+
+                for _ in 0..repeat_count {
+                    let src_addr = I8086State::linear_address(seg_src, self.state.si) as u64;
+                    let dst_addr = I8086State::linear_address(seg_dst, self.state.di) as u64;
+                    if is_16 {
+                        let val = bus.read_u16(src_addr, Endianness::LittleEndian)?;
+                        bus.write_u16(dst_addr, val, Endianness::LittleEndian)?;
+                    } else {
+                        let val = bus.read_u8(src_addr)?;
+                        bus.write_u8(dst_addr, val)?;
+                    }
+                    self.state.si = (self.state.si as i16).wrapping_add(step) as u16;
+                    self.state.di = (self.state.di as i16).wrapping_add(step) as u16;
+                    if rep_prefix.is_some() {
+                        self.state.cx = self.state.cx.wrapping_sub(1);
+                    }
+                }
+                Ok(StepOutcome::Continue { cycles: 18 })
+            }
+            0xA6 | 0xA7 => {
+                // CMPSB / CMPSW
+                let is_16 = opcode == 0xA7;
+                let step = if (self.state.flags & flags::DF) != 0 { if is_16 { -2i16 } else { -1i16 } } else { if is_16 { 2i16 } else { 1i16 } };
+                let seg_src = seg_override.unwrap_or(self.state.ds);
+                let seg_dst = self.state.es;
+
+                loop {
+                    let src_addr = I8086State::linear_address(seg_src, self.state.si) as u64;
+                    let dst_addr = I8086State::linear_address(seg_dst, self.state.di) as u64;
+                    if is_16 {
+                        let v1 = bus.read_u16(src_addr, Endianness::LittleEndian)?;
+                        let v2 = bus.read_u16(dst_addr, Endianness::LittleEndian)?;
+                        self.alu_sub_u16(v1, v2, false);
+                    } else {
+                        let v1 = bus.read_u8(src_addr)?;
+                        let v2 = bus.read_u8(dst_addr)?;
+                        self.alu_sub_u8(v1, v2, false);
+                    }
+                    self.state.si = (self.state.si as i16).wrapping_add(step) as u16;
+                    self.state.di = (self.state.di as i16).wrapping_add(step) as u16;
+
+                    if let Some(rep) = rep_prefix {
+                        self.state.cx = self.state.cx.wrapping_sub(1);
+                        let zf = (self.state.flags & flags::ZF) != 0;
+                        let stop = (rep == 0xF3 && !zf) || (rep == 0xF2 && zf) || self.state.cx == 0;
+                        if stop { break; }
+                    } else {
+                        break;
+                    }
+                }
+                Ok(StepOutcome::Continue { cycles: 22 })
+            }
+            0xAA | 0xAB => {
+                // STOSB / STOSW
+                let is_16 = opcode == 0xAB;
+                let step = if (self.state.flags & flags::DF) != 0 { if is_16 { -2i16 } else { -1i16 } } else { if is_16 { 2i16 } else { 1i16 } };
+                let seg_dst = self.state.es;
+
+                let repeat_count = match rep_prefix {
+                    Some(_) => self.state.cx,
+                    None => 1,
+                };
+
+                for _ in 0..repeat_count {
+                    let dst_addr = I8086State::linear_address(seg_dst, self.state.di) as u64;
+                    if is_16 {
+                        bus.write_u16(dst_addr, self.state.ax, Endianness::LittleEndian)?;
+                    } else {
+                        bus.write_u8(dst_addr, (self.state.ax & 0xFF) as u8)?;
+                    }
+                    self.state.di = (self.state.di as i16).wrapping_add(step) as u16;
+                    if rep_prefix.is_some() {
+                        self.state.cx = self.state.cx.wrapping_sub(1);
+                    }
+                }
+                Ok(StepOutcome::Continue { cycles: 11 })
+            }
+            0xAC | 0xAD => {
+                // LODSB / LODSW
+                let is_16 = opcode == 0xAD;
+                let step = if (self.state.flags & flags::DF) != 0 { if is_16 { -2i16 } else { -1i16 } } else { if is_16 { 2i16 } else { 1i16 } };
+                let seg_src = seg_override.unwrap_or(self.state.ds);
+
+                let src_addr = I8086State::linear_address(seg_src, self.state.si) as u64;
+                if is_16 {
+                    self.state.ax = bus.read_u16(src_addr, Endianness::LittleEndian)?;
+                } else {
+                    self.set_reg8(0, bus.read_u8(src_addr)?);
+                }
+                self.state.si = (self.state.si as i16).wrapping_add(step) as u16;
+                Ok(StepOutcome::Continue { cycles: 12 })
+            }
+            0xAE | 0xAF => {
+                // SCASB / SCASW
+                let is_16 = opcode == 0xAF;
+                let step = if (self.state.flags & flags::DF) != 0 { if is_16 { -2i16 } else { -1i16 } } else { if is_16 { 2i16 } else { 1i16 } };
+                let seg_dst = self.state.es;
+
+                loop {
+                    let dst_addr = I8086State::linear_address(seg_dst, self.state.di) as u64;
+                    if is_16 {
+                        let v = bus.read_u16(dst_addr, Endianness::LittleEndian)?;
+                        self.alu_sub_u16(self.state.ax, v, false);
+                    } else {
+                        let v = bus.read_u8(dst_addr)?;
+                        self.alu_sub_u8((self.state.ax & 0xFF) as u8, v, false);
+                    }
+                    self.state.di = (self.state.di as i16).wrapping_add(step) as u16;
+
+                    if let Some(rep) = rep_prefix {
+                        self.state.cx = self.state.cx.wrapping_sub(1);
+                        let zf = (self.state.flags & flags::ZF) != 0;
+                        let stop = (rep == 0xF3 && !zf) || (rep == 0xF2 && zf) || self.state.cx == 0;
+                        if stop { break; }
+                    } else {
+                        break;
+                    }
+                }
+                Ok(StepOutcome::Continue { cycles: 15 })
+            }
+
+            // Port I/O (0xE4..0xE7, 0xEC..0xEF)
+            0xE4 => {
+                let port = self.fetch_u8(bus)? as u64;
+                let val = bus.read_u8(port)?;
+                self.set_reg8(0, val);
+                Ok(StepOutcome::Continue { cycles: 10 })
+            }
+            0xE5 => {
+                let port = self.fetch_u8(bus)? as u64;
+                let val = bus.read_u16(port, Endianness::LittleEndian)?;
+                self.state.ax = val;
+                Ok(StepOutcome::Continue { cycles: 10 })
+            }
+            0xE6 => {
+                let port = self.fetch_u8(bus)? as u64;
+                bus.write_u8(port, (self.state.ax & 0xFF) as u8)?;
+                Ok(StepOutcome::Continue { cycles: 10 })
+            }
+            0xE7 => {
+                let port = self.fetch_u8(bus)? as u64;
+                bus.write_u16(port, self.state.ax, Endianness::LittleEndian)?;
+                Ok(StepOutcome::Continue { cycles: 10 })
+            }
+            0xEC => {
+                let port = self.state.dx as u64;
+                let val = bus.read_u8(port)?;
+                self.set_reg8(0, val);
+                Ok(StepOutcome::Continue { cycles: 8 })
+            }
+            0xED => {
+                let port = self.state.dx as u64;
+                let val = bus.read_u16(port, Endianness::LittleEndian)?;
+                self.state.ax = val;
+                Ok(StepOutcome::Continue { cycles: 8 })
+            }
+            0xEE => {
+                let port = self.state.dx as u64;
+                bus.write_u8(port, (self.state.ax & 0xFF) as u8)?;
+                Ok(StepOutcome::Continue { cycles: 8 })
+            }
+            0xEF => {
+                let port = self.state.dx as u64;
+                bus.write_u16(port, self.state.ax, Endianness::LittleEndian)?;
+                Ok(StepOutcome::Continue { cycles: 8 })
+            }
+
+            // Sign Extensions (CBW, CWD)
+            0x98 => {
+                // CBW
+                let al = (self.state.ax & 0xFF) as u8 as i8;
+                self.state.ax = (al as i16) as u16;
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x99 => {
+                // CWD
+                self.state.dx = if (self.state.ax & 0x8000) != 0 { 0xFFFF } else { 0x0000 };
+                Ok(StepOutcome::Continue { cycles: 5 })
+            }
+
+            // Flag Transfers (LAHF, SAHF)
+            0x9F => {
+                // LAHF (AH <- flags lower byte)
+                let f = (self.state.flags & 0xFF) as u8;
+                self.set_reg8(4, f);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x9E => {
+                // SAHF (flags lower byte <- AH)
+                let ah = self.get_reg8(4);
+                self.state.flags = (self.state.flags & 0xFF00) | (ah as u16) | 0x0002;
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+
+            // BCD / Base Adjust Instructions (AAM, AAD)
+            0xD4 => {
+                // AAM
+                let base = self.fetch_u8(bus)?;
+                if base == 0 {
+                    return Ok(StepOutcome::Interrupt(0));
+                }
+                let al = (self.state.ax & 0xFF) as u8;
+                let ah = al / base;
+                let al_rem = al % base;
+                self.state.ax = ((ah as u16) << 8) | (al_rem as u16);
+                let zf = al_rem == 0;
+                let sf = (al_rem & 0x80) != 0;
+                let pf = I8086State::parity(al_rem);
+                self.set_flags(false, pf, false, zf, sf, false);
+                Ok(StepOutcome::Continue { cycles: 83 })
+            }
+            0xD5 => {
+                // AAD
+                let base = self.fetch_u8(bus)?;
+                let ah = (self.state.ax >> 8) as u8;
+                let al = (self.state.ax & 0xFF) as u8;
+                let res = ah.wrapping_mul(base).wrapping_add(al);
+                self.state.ax = res as u16;
+                let zf = res == 0;
+                let sf = (res & 0x80) != 0;
+                let pf = I8086State::parity(res);
+                self.set_flags(false, pf, false, zf, sf, false);
+                Ok(StepOutcome::Continue { cycles: 60 })
             }
 
             // Flag instructions

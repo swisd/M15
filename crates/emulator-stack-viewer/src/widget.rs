@@ -22,9 +22,9 @@ impl StackViewerWidget {
     #[cfg(feature = "egui")]
     pub fn show(&mut self, ui: &mut Ui, analysis: &StackAnalysis, options: &mut StackViewOptions) {
         ui.vertical(|ui| {
-            // Top Toolbar / Controls
+            // Top Toolbar / Controls Row 1
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Display Format:").strong());
+                ui.label(RichText::new("Format:").strong());
                 egui::ComboBox::from_id_salt("stack_display_format")
                     .selected_text(match options.display_format {
                         DisplayFormat::Hex => "Hexadecimal",
@@ -64,15 +64,61 @@ impl StackViewerWidget {
                 ui.separator();
 
                 ui.label("Slots:");
-                ui.add(egui::Slider::new(&mut options.slot_count, 4..=128).text("count"));
+                ui.add(egui::Slider::new(&mut options.slot_count, 4..=128).text("total"));
+
+                ui.label("Above SP:");
+                ui.add(egui::Slider::new(&mut options.slots_above_sp, 0..=32).text("slots"));
 
                 ui.separator();
 
                 ui.checkbox(&mut options.show_raw_bytes, "Raw Bytes");
                 ui.checkbox(&mut options.show_ascii, "ASCII");
+            });
 
-                if options.custom_base_addr.is_some() && ui.button("Reset to SP").clicked() {
+            ui.add_space(2.0);
+
+            // Traversal & Lock Controls Row 2
+            ui.horizontal_wrapped(|ui| {
+                let lock_text = if options.lock_to_sp {
+                    RichText::new("🔒 Locked to SP").color(Color32::from_rgb(80, 220, 120)).strong()
+                } else {
+                    RichText::new("🔓 Unlocked View").color(Color32::from_rgb(255, 200, 80)).strong()
+                };
+
+                if ui.button(lock_text).clicked() {
+                    options.lock_to_sp = !options.lock_to_sp;
+                    if options.lock_to_sp {
+                        options.custom_base_addr = None;
+                        options.scroll_offset_slots = 0;
+                    }
+                }
+
+                ui.separator();
+                ui.label("Traverse:");
+
+                if ui.button("⏮ -16").clicked() {
+                    options.lock_to_sp = false;
+                    options.scroll_offset_slots = options.scroll_offset_slots.saturating_sub(16);
+                }
+                if ui.button("◀ -1").clicked() {
+                    options.lock_to_sp = false;
+                    options.scroll_offset_slots = options.scroll_offset_slots.saturating_sub(1);
+                }
+                if ui.button("▶ +1").clicked() {
+                    options.lock_to_sp = false;
+                    options.scroll_offset_slots = options.scroll_offset_slots.saturating_add(1);
+                }
+                if ui.button("⏭ +16").clicked() {
+                    options.lock_to_sp = false;
+                    options.scroll_offset_slots = options.scroll_offset_slots.saturating_add(16);
+                }
+
+                if (!options.lock_to_sp || options.scroll_offset_slots != 0 || options.custom_base_addr.is_some())
+                    && ui.button(RichText::new("🎯 Reset to SP").color(Color32::from_rgb(100, 220, 255))).clicked()
+                {
+                    options.lock_to_sp = true;
                     options.custom_base_addr = None;
+                    options.scroll_offset_slots = 0;
                 }
             });
 
@@ -112,8 +158,9 @@ impl StackViewerWidget {
 
             ui.separator();
 
-            // Stack Slots Table / List
+            // Stack Slots Table / List with independent scrolling
             ScrollArea::vertical()
+                .id_salt("stack_viewer_scroll_area")
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
                     egui::Grid::new("stack_viewer_grid")

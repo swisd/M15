@@ -2,8 +2,9 @@ use emulator_core::arch::Architecture;
 use emulator_core::bus::{DynamicMemory, MemoryBus};
 use emulator_core::cpu::CpuEngine;
 use emulator_gui::{
-    EmulatorApp, ExecutionState, SerialConsole, SerialLineEnding, SerialParity, TerminalCell,
-    TerminalScreen, DEFAULT_VRAM_BASE_ADDR, DEMOS, TERMINAL_COLS, TERMINAL_ROWS,
+    parse_hex_addr, EmulatorApp, ExecutionState, InterruptMode, SerialConsole, SerialLineEnding,
+    SerialParity, TerminalCell, TerminalScreen, VgaBufferConfig, VgaBufferPreset,
+    DEFAULT_VRAM_BASE_ADDR, DEMOS, TERMINAL_COLS, TERMINAL_ROWS,
 };
 
 #[test]
@@ -315,4 +316,275 @@ fn test_app_scratchpad_assemble_and_run() {
     }
 
     assert_eq!(app.cpu.get_register("r16"), Some(0x30));
+}
+
+#[test]
+fn test_interrupt_mode_metadata_and_switching() {
+    assert_eq!(InterruptMode::ALL.len(), 4);
+    assert_eq!(InterruptMode::ArchDefault.name(), "Arch Default");
+    assert_eq!(InterruptMode::MsDos.name(), "MS-DOS");
+    assert_eq!(InterruptMode::Bios.name(), "BIOS");
+    assert_eq!(InterruptMode::Uefi.name(), "UEFI");
+
+    assert!(InterruptMode::ArchDefault.display_label().contains("Arch Default"));
+    assert!(InterruptMode::MsDos.display_label().contains("MS-DOS"));
+    assert!(InterruptMode::Bios.display_label().contains("BIOS"));
+    assert!(InterruptMode::Uefi.display_label().contains("UEFI"));
+
+    let mut app = EmulatorApp::new(Architecture::X86_64);
+    assert_eq!(app.interrupt_mode, InterruptMode::ArchDefault);
+
+    app.set_interrupt_mode(InterruptMode::MsDos);
+    assert_eq!(app.interrupt_mode, InterruptMode::MsDos);
+    assert!(app.status_message.as_ref().unwrap().contains("MS-DOS"));
+
+    app.set_interrupt_mode(InterruptMode::Bios);
+    assert_eq!(app.interrupt_mode, InterruptMode::Bios);
+
+    app.set_interrupt_mode(InterruptMode::Uefi);
+    assert_eq!(app.interrupt_mode, InterruptMode::Uefi);
+}
+
+#[test]
+fn test_vga_buffer_presets_and_custom_configuration() {
+    let mut config = VgaBufferConfig::default();
+    assert_eq!(config.preset, VgaBufferPreset::BiosDefault);
+    assert_eq!(config.base_addr, 0x000B_8000);
+
+    // Apply UEFI preset
+    config.apply_preset(VgaBufferPreset::UefiDefault);
+    assert_eq!(config.preset, VgaBufferPreset::UefiDefault);
+    assert_eq!(config.base_addr, 0x00A0_0000);
+
+    // Apply Custom address
+    config.set_custom_addr(0x0004_0000);
+    assert_eq!(config.preset, VgaBufferPreset::Custom);
+    assert_eq!(config.base_addr, 0x0004_0000);
+
+    // Test parse_hex_addr
+    assert_eq!(parse_hex_addr("0x000B8000"), Some(0xB8000));
+    assert_eq!(parse_hex_addr("0xA0000"), Some(0xA0000));
+    assert_eq!(parse_hex_addr("B800h"), Some(0xB800));
+    assert_eq!(parse_hex_addr("0x10_0000"), Some(0x100000));
+    assert_eq!(parse_hex_addr("10000"), Some(0x10000));
+    assert_eq!(parse_hex_addr("   "), None);
+
+    // Test app VGA buffer preset switching
+    let mut app = EmulatorApp::new(Architecture::I8086);
+    assert_eq!(app.terminal.vram_base_addr, 0x000B_8000);
+
+    app.set_vga_buffer_preset(VgaBufferPreset::UefiDefault);
+    assert_eq!(app.vga_buffer_config.preset, VgaBufferPreset::UefiDefault);
+    assert_eq!(app.terminal.vram_base_addr, 0x00A0_0000);
+
+    app.set_vga_buffer_preset(VgaBufferPreset::BiosDefault);
+    assert_eq!(app.vga_buffer_config.preset, VgaBufferPreset::BiosDefault);
+    assert_eq!(app.terminal.vram_base_addr, 0x000B_8000);
+}
+
+#[test]
+fn test_msdos_interrupt_services_execution() {
+    let mut app = EmulatorApp::new(Architecture::I8086);
+    app.set_interrupt_mode(InterruptMode::MsDos);
+    app.terminal.clear(0x07);
+
+    // Setup a small MS-DOS assembly program that prints a string and exits
+    let msdos_code = r#"
+        .org 0x1000
+        mov ax, 0x0900
+        mov dx, 0x2000
+        int 0x21
+        mov ax, 0x4C00
+        int 0x21
+    "#;
+    app.load_asm_source(msdos_code, "dos_test.asm", None, Some(Architecture::I8086));
+    app.set_interrupt_mode(InterruptMode::MsDos);
+    app.terminal.clear(0x07);
+
+    // Place "$"-terminated string at DS:DX (0x2000)
+    let msg = b"Hello DOS Terminal!$\0";
+    for (i, &b) in msg.iter().enumerate() {
+        app.bus.write_u8(0x2000 + i as u64, b).unwrap();
+    }
+
+    // Step through the instructions
+    app.step(); // mov ax, 0x0900
+    app.step(); // mov dx, 0x2000
+    app.step(); // int 0x21 (AH=09h)
+    assert!(app.status_message.as_ref().unwrap().contains("MS-DOS INT 21h AH=09h"));
+
+    app.step(); // mov ax, 0x4C00
+    app.step(); // int 0x21 (AH=4Ch)
+
+    // Verify program reached exit
+    assert_eq!(app.execution_state, ExecutionState::Stopped);
+    assert!(app.status_message.as_ref().unwrap().contains("MS-DOS Program Terminated"));
+
+    // Verify terminal received string output
+    let cell = app.terminal.get_cell(0, 0).unwrap();
+    assert_eq!(cell.char_code, b'H');
+}
+
+#[test]
+fn test_bios_interrupt_services_execution() {
+    let mut app = EmulatorApp::new(Architecture::I8086);
+    app.set_interrupt_mode(InterruptMode::Bios);
+    app.terminal.clear(0x07);
+
+    // Setup BIOS INT 10h Teletype output: AH=0Eh, AL='Z'
+    let bios_code = r#"
+        .org 0x1000
+        mov ax, 0x0E5A
+        mov bx, 0x001F
+        int 0x10
+        hlt
+    "#;
+    app.load_asm_source(bios_code, "bios_test.asm", None, Some(Architecture::I8086));
+    app.set_interrupt_mode(InterruptMode::Bios);
+    app.terminal.clear(0x07);
+
+    app.step(); // mov ax, 0x0E5A
+    app.step(); // mov bx, 0x001F
+    app.step(); // int 0x10
+    app.step(); // hlt
+
+    // Verify character 'Z' was written to terminal and synced to VRAM
+    let cell = app.terminal.get_cell(0, 0).unwrap();
+    assert_eq!(cell.char_code, b'Z');
+    assert_eq!(cell.attribute, 0x1F);
+    assert_eq!(app.bus.read_u8(DEFAULT_VRAM_BASE_ADDR).unwrap(), b'Z');
+    assert_eq!(app.bus.read_u8(DEFAULT_VRAM_BASE_ADDR + 1).unwrap(), 0x1F);
+}
+
+#[test]
+fn test_uefi_interrupt_services_execution() {
+    let mut app = EmulatorApp::new(Architecture::X86_64);
+    app.set_interrupt_mode(InterruptMode::Uefi);
+    app.set_vga_buffer_preset(VgaBufferPreset::UefiDefault);
+
+    // Test UEFI interrupt call
+    let (msg, state) = emulator_gui::dispatch_interrupt(
+        InterruptMode::Uefi,
+        0x80,
+        &mut app.cpu,
+        &mut app.bus,
+        &mut app.terminal,
+        &mut app.serial_console,
+    );
+
+    assert!(msg.is_some());
+    assert!(msg.unwrap().contains("UEFI Service Call"));
+    assert_eq!(state, None);
+}
+
+#[test]
+fn test_reset_cpu_preserves_assembled_program() {
+    let mut app = EmulatorApp::new(Architecture::I8086);
+    let code = r#"
+        .org 0x1000
+        mov ax, 0x1234
+        mov bx, 0x5678
+        add ax, bx
+        hlt
+    "#;
+    app.load_asm_source(code, "add_test.asm", None, Some(Architecture::I8086));
+    assert!(app.loaded_program.is_some());
+    assert_eq!(app.cpu.pc(), 0x1000);
+
+    // Step a few instructions
+    app.step(); // mov ax, 0x1234
+    app.step(); // mov bx, 0x5678
+    assert_eq!(app.cpu.get_register("AX"), Some(0x1234));
+    assert_eq!(app.cpu.get_register("BX"), Some(0x5678));
+    assert!(app.step_count >= 2);
+
+    // Reset CPU
+    app.reset_cpu();
+
+    // Verify PC and registers reset to the loaded program entry state
+    assert_eq!(app.cpu.pc(), 0x1000);
+    assert_eq!(app.step_count, 0);
+    assert_eq!(app.execution_state, ExecutionState::Stopped);
+    assert!(app.loaded_program.is_some());
+    assert!(app.status_message.as_ref().unwrap().contains("Reset to assembled program"));
+}
+
+#[test]
+fn test_file_browser_navigation_and_filtering() {
+    use std::path::PathBuf;
+    let mut browser = emulator_gui::FileBrowserModal::new();
+    assert!(!browser.is_open);
+
+    browser.open();
+    assert!(browser.is_open);
+
+    let test_dir = PathBuf::from("test-projects");
+    if test_dir.is_dir() {
+        browser.navigate_to(test_dir.clone());
+        assert_eq!(browser.current_dir, test_dir);
+
+        browser.navigate_up();
+        assert_ne!(browser.current_dir, test_dir);
+    }
+
+    // Supported file filtering
+    assert!(browser.is_supported_file(std::path::Path::new("main.asm")));
+    assert!(browser.is_supported_file(std::path::Path::new("mconfig.toml")));
+    assert!(browser.is_supported_file(std::path::Path::new("header.inc")));
+    assert!(!browser.is_supported_file(std::path::Path::new("image.png")));
+
+    browser.show_all_files = true;
+    assert!(browser.is_supported_file(std::path::Path::new("image.png")));
+
+    browser.close();
+    assert!(!browser.is_open);
+}
+
+#[test]
+fn test_disassemble_instruction_all_architectures() {
+    use emulator_gui::disassemble_instruction;
+
+    // x86 / x86_64 / i8086 NOP and HLT
+    let asm = disassemble_instruction(Architecture::X86_64, 0x1000, &[0x90], &[0x90, 0, 0, 0], None);
+    assert_eq!(asm, "nop");
+
+    let asm = disassemble_instruction(Architecture::I8086, 0x1000, &[0xCD, 0x21], &[0xCD, 0x21, 0, 0], None);
+    assert_eq!(asm, "int 0x21");
+
+    // 6502 NOP & RTS
+    let asm = disassemble_instruction(Architecture::Mos6502, 0x8000, &[0xEA], &[0xEA, 0, 0, 0], None);
+    assert_eq!(asm, "nop");
+
+    let asm = disassemble_instruction(Architecture::Mos6502, 0x8000, &[0x60], &[0x60, 0, 0, 0], None);
+    assert_eq!(asm, "rts");
+
+    // AVR RET
+    let asm = disassemble_instruction(Architecture::Avr, 0x0000, &[0x08, 0x95], &[0x08, 0x95, 0, 0], None);
+    assert_eq!(asm, "ret");
+
+    // RISC-V NOP (addi x0, x0, 0)
+    let asm = disassemble_instruction(Architecture::RiscV, 0x80000000, &[0x13, 0x00, 0x00, 0x00], &[0x13, 0x00, 0x00, 0x00], None);
+    assert_eq!(asm, "nop");
+
+    // ARM32 NOP
+    let asm = disassemble_instruction(Architecture::Arm32, 0x1000, &[0x00, 0x00, 0xA0, 0xE1], &[0x00, 0x00, 0xA0, 0xE1], None);
+    assert_eq!(asm, "nop");
+
+    // ARM64 NOP
+    let asm = disassemble_instruction(Architecture::Arm64, 0x1000, &[0x1F, 0x20, 0x03, 0xD5], &[0x1F, 0x20, 0x03, 0xD5], None);
+    assert_eq!(asm, "nop");
+}
+
+#[test]
+fn test_code_panel_state_and_traversal() {
+    let mut state = emulator_gui::CodePanelState::default();
+    assert!(state.lock_to_pc);
+    assert_eq!(state.scroll_offset_instr, 0);
+
+    state.lock_to_pc = false;
+    state.scroll_offset_instr = 8;
+    assert_eq!(state.scroll_offset_instr, 8);
+
+    state.custom_start_addr = Some(0x2000);
+    assert_eq!(state.custom_start_addr, Some(0x2000));
 }

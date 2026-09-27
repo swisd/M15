@@ -109,8 +109,61 @@ impl CpuEngine for PaRiscCpu {
                 Ok(StepOutcome::Halted)
             }
             _ => {
-                self.state.gr[0] = 0;
-                Ok(StepOutcome::Continue { cycles: 1 })
+                let op = (instr >> 26) & 0x3F;
+
+                match op {
+                    0x0D => {
+                        // LDO imm(r1), r2
+                        let r1 = ((instr >> 21) & 0x1F) as usize;
+                        let r2 = ((instr >> 16) & 0x1F) as usize;
+                        let imm14 = (instr as i16) as i32 as u32;
+                        let r1_val = if r1 == 0 { 0 } else { self.state.gr[r1] };
+                        if r2 != 0 {
+                            self.state.gr[r2] = r1_val.wrapping_add(imm14);
+                        }
+                        self.state.gr[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x02 => {
+                        let ext = (instr >> 5) & 0xFF;
+                        let r1 = ((instr >> 21) & 0x1F) as usize;
+                        let r2 = ((instr >> 16) & 0x1F) as usize;
+                        let t = (instr & 0x1F) as usize;
+                        let r1_val = self.state.gr[r1];
+                        let r2_val = self.state.gr[r2];
+
+                        if ext == 0x30 {
+                            // ADD r1, r2, t
+                            if t != 0 {
+                                self.state.gr[t] = r1_val.wrapping_add(r2_val);
+                            }
+                        } else if ext == 0x20 {
+                            // SUB r1, r2, t
+                            if t != 0 {
+                                self.state.gr[t] = r1_val.wrapping_sub(r2_val);
+                            }
+                        }
+                        self.state.gr[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x3A => {
+                        // B,L / BV (Branch)
+                        let w = instr & 0x001FFFFF;
+                        let sign_ext = if (w & 0x00100000) != 0 {
+                            w | 0xFFE00000
+                        } else {
+                            w
+                        };
+                        let offset = ((sign_ext as i32) << 2) as u32;
+                        self.state.pc = self.state.pc.wrapping_add(offset);
+                        self.state.gr[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    _ => {
+                        self.state.gr[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                }
             }
         }
     }

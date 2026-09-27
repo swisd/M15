@@ -111,22 +111,188 @@ impl CpuEngine for MipsCpu {
             }
             _ => {
                 let opcode = (instr >> 26) & 0x3F;
+                let rs = ((instr >> 21) & 0x1F) as usize;
+                let rt = ((instr >> 16) & 0x1F) as usize;
+                let rd = ((instr >> 11) & 0x1F) as usize;
+                let sa = ((instr >> 6) & 0x1F) as u32;
+                let funct = instr & 0x3F;
+                let imm_signed = (instr as i16) as i32 as u32;
+                let imm_unsigned = (instr & 0xFFFF) as u32;
+
                 match opcode {
-                    0x09 => {
-                        // ADDIU rt, rs, imm
-                        let rs = ((instr >> 21) & 0x1F) as usize;
-                        let rt = ((instr >> 16) & 0x1F) as usize;
-                        let imm = (instr as i16) as i32;
-                        if rt != 0 {
-                            self.state.r[rt] = (self.state.r[rs] as i32).wrapping_add(imm) as u32;
+                    0x00 => {
+                        // SPECIAL / R-type
+                        match funct {
+                            0x20 | 0x21 => {
+                                // ADD / ADDU
+                                if rd != 0 {
+                                    self.state.r[rd] = self.state.r[rs].wrapping_add(self.state.r[rt]);
+                                }
+                            }
+                            0x22 | 0x23 => {
+                                // SUB / SUBU
+                                if rd != 0 {
+                                    self.state.r[rd] = self.state.r[rs].wrapping_sub(self.state.r[rt]);
+                                }
+                            }
+                            0x24 => {
+                                // AND
+                                if rd != 0 {
+                                    self.state.r[rd] = self.state.r[rs] & self.state.r[rt];
+                                }
+                            }
+                            0x25 => {
+                                // OR
+                                if rd != 0 {
+                                    self.state.r[rd] = self.state.r[rs] | self.state.r[rt];
+                                }
+                            }
+                            0x26 => {
+                                // XOR
+                                if rd != 0 {
+                                    self.state.r[rd] = self.state.r[rs] ^ self.state.r[rt];
+                                }
+                            }
+                            0x27 => {
+                                // NOR
+                                if rd != 0 {
+                                    self.state.r[rd] = !(self.state.r[rs] | self.state.r[rt]);
+                                }
+                            }
+                            0x2A => {
+                                // SLT
+                                if rd != 0 {
+                                    self.state.r[rd] = if (self.state.r[rs] as i32) < (self.state.r[rt] as i32) { 1 } else { 0 };
+                                }
+                            }
+                            0x2B => {
+                                // SLTU
+                                if rd != 0 {
+                                    self.state.r[rd] = if self.state.r[rs] < self.state.r[rt] { 1 } else { 0 };
+                                }
+                            }
+                            0x08 => {
+                                // JR rs
+                                self.state.pc = self.state.r[rs];
+                            }
+                            0x09 => {
+                                // JALR rd, rs
+                                if rd != 0 {
+                                    self.state.r[rd] = self.state.pc;
+                                } else {
+                                    self.state.r[31] = self.state.pc;
+                                }
+                                self.state.pc = self.state.r[rs];
+                            }
+                            0x00 => {
+                                // SLL
+                                if rd != 0 {
+                                    self.state.r[rd] = self.state.r[rt].wrapping_shl(sa);
+                                }
+                            }
+                            0x02 => {
+                                // SRL
+                                if rd != 0 {
+                                    self.state.r[rd] = self.state.r[rt].wrapping_shr(sa);
+                                }
+                            }
+                            0x03 => {
+                                // SRA
+                                if rd != 0 {
+                                    self.state.r[rd] = ((self.state.r[rt] as i32) >> sa) as u32;
+                                }
+                            }
+                            _ => {
+                                return Err(CpuError::InvalidInstruction { opcode: instr as u64, pc });
+                            }
                         }
                         self.state.r[0] = 0;
                         Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x08 | 0x09 => {
+                        // ADDI / ADDIU
+                        if rt != 0 {
+                            self.state.r[rt] = self.state.r[rs].wrapping_add(imm_signed);
+                        }
+                        self.state.r[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x0C => {
+                        // ANDI
+                        if rt != 0 {
+                            self.state.r[rt] = self.state.r[rs] & imm_unsigned;
+                        }
+                        self.state.r[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x0D => {
+                        // ORI
+                        if rt != 0 {
+                            self.state.r[rt] = self.state.r[rs] | imm_unsigned;
+                        }
+                        self.state.r[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x0E => {
+                        // XORI
+                        if rt != 0 {
+                            self.state.r[rt] = self.state.r[rs] ^ imm_unsigned;
+                        }
+                        self.state.r[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x0F => {
+                        // LUI
+                        if rt != 0 {
+                            self.state.r[rt] = imm_unsigned << 16;
+                        }
+                        self.state.r[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x23 => {
+                        // LW rt, offset(rs)
+                        let addr = self.state.r[rs].wrapping_add(imm_signed) as u64;
+                        let val = bus.read_u32(addr, Endianness::BigEndian)?;
+                        if rt != 0 {
+                            self.state.r[rt] = val;
+                        }
+                        self.state.r[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    0x2B => {
+                        // SW rt, offset(rs)
+                        let addr = self.state.r[rs].wrapping_add(imm_signed) as u64;
+                        let val = self.state.r[rt];
+                        bus.write_u32(addr, val, Endianness::BigEndian)?;
+                        Ok(StepOutcome::Continue { cycles: 2 })
                     }
                     0x02 => {
                         // J target
                         let target = (instr & 0x03FF_FFFF) << 2;
                         self.state.pc = (self.state.pc & 0xF000_0000) | target;
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    0x03 => {
+                        // JAL target
+                        let target = (instr & 0x03FF_FFFF) << 2;
+                        self.state.r[31] = self.state.pc;
+                        self.state.pc = (self.state.pc & 0xF000_0000) | target;
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    0x04 => {
+                        // BEQ rs, rt, offset
+                        if self.state.r[rs] == self.state.r[rt] {
+                            let offset = ((imm_signed as i32) << 2) as u32;
+                            self.state.pc = self.state.pc.wrapping_add(offset);
+                        }
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    0x05 => {
+                        // BNE rs, rt, offset
+                        if self.state.r[rs] != self.state.r[rt] {
+                            let offset = ((imm_signed as i32) << 2) as u32;
+                            self.state.pc = self.state.pc.wrapping_add(offset);
+                        }
                         Ok(StepOutcome::Continue { cycles: 2 })
                     }
                     _ => Err(CpuError::InvalidInstruction {
@@ -184,6 +350,16 @@ impl CpuEngine for MipsCpu {
     }
 
     fn get_register(&self, name: &str) -> Option<u64> {
+        const MIPS_NAMES: [&str; 32] = [
+            "$zero", "$at", "$v0", "$v1", "$a0", "$a1", "$a2", "$a3", "$t0", "$t1", "$t2",
+            "$t3", "$t4", "$t5", "$t6", "$t7", "$s0", "$s1", "$s2", "$s3", "$s4", "$s5",
+            "$s6", "$s7", "$t8", "$t9", "$k0", "$k1", "$gp", "$sp", "$fp", "$ra",
+        ];
+        for (i, &n) in MIPS_NAMES.iter().enumerate() {
+            if name.eq_ignore_ascii_case(n) || name.eq_ignore_ascii_case(&n[1..]) {
+                return Some(self.state.r[i] as u64);
+            }
+        }
         if let Some(num_str) = name
             .strip_prefix("$r")
             .or_else(|| name.strip_prefix('r'))
@@ -193,19 +369,6 @@ impl CpuEngine for MipsCpu {
                     return Some(self.state.r[idx] as u64);
                 }
         match name {
-            s if s.eq_ignore_ascii_case("$zero") || s.eq_ignore_ascii_case("zero") => Some(0),
-            s if s.eq_ignore_ascii_case("$sp") || s.eq_ignore_ascii_case("sp") => {
-                Some(self.state.r[29] as u64)
-            }
-            s if s.eq_ignore_ascii_case("$ra") || s.eq_ignore_ascii_case("ra") => {
-                Some(self.state.r[31] as u64)
-            }
-            s if s.eq_ignore_ascii_case("$gp") || s.eq_ignore_ascii_case("gp") => {
-                Some(self.state.r[28] as u64)
-            }
-            s if s.eq_ignore_ascii_case("$fp") || s.eq_ignore_ascii_case("fp") => {
-                Some(self.state.r[30] as u64)
-            }
             s if s.eq_ignore_ascii_case("pc") => Some(self.state.pc as u64),
             s if s.eq_ignore_ascii_case("hi") => Some(self.state.hi as u64),
             s if s.eq_ignore_ascii_case("lo") => Some(self.state.lo as u64),
@@ -215,6 +378,19 @@ impl CpuEngine for MipsCpu {
 
     fn set_register(&mut self, name: &str, val: u64) -> Result<(), CpuError> {
         let v = (val & 0xFFFF_FFFF) as u32;
+        const MIPS_NAMES: [&str; 32] = [
+            "$zero", "$at", "$v0", "$v1", "$a0", "$a1", "$a2", "$a3", "$t0", "$t1", "$t2",
+            "$t3", "$t4", "$t5", "$t6", "$t7", "$s0", "$s1", "$s2", "$s3", "$s4", "$s5",
+            "$s6", "$s7", "$t8", "$t9", "$k0", "$k1", "$gp", "$sp", "$fp", "$ra",
+        ];
+        for (i, &n) in MIPS_NAMES.iter().enumerate() {
+            if name.eq_ignore_ascii_case(n) || name.eq_ignore_ascii_case(&n[1..]) {
+                if i != 0 {
+                    self.state.r[i] = v;
+                }
+                return Ok(());
+            }
+        }
         if let Some(num_str) = name
             .strip_prefix("$r")
             .or_else(|| name.strip_prefix('r'))
@@ -227,19 +403,6 @@ impl CpuEngine for MipsCpu {
                     return Ok(());
                 }
         match name {
-            s if s.eq_ignore_ascii_case("$zero") || s.eq_ignore_ascii_case("zero") => {}
-            s if s.eq_ignore_ascii_case("$sp") || s.eq_ignore_ascii_case("sp") => {
-                self.state.r[29] = v
-            }
-            s if s.eq_ignore_ascii_case("$ra") || s.eq_ignore_ascii_case("ra") => {
-                self.state.r[31] = v
-            }
-            s if s.eq_ignore_ascii_case("$gp") || s.eq_ignore_ascii_case("gp") => {
-                self.state.r[28] = v
-            }
-            s if s.eq_ignore_ascii_case("$fp") || s.eq_ignore_ascii_case("fp") => {
-                self.state.r[30] = v
-            }
             s if s.eq_ignore_ascii_case("pc") => self.state.pc = v,
             s if s.eq_ignore_ascii_case("hi") => self.state.hi = v,
             s if s.eq_ignore_ascii_case("lo") => self.state.lo = v,

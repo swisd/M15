@@ -173,30 +173,92 @@ impl Mos6502Cpu {
     // --- ALU Operations ---
 
     fn op_adc(&mut self, val: u8) {
-        let carry = if (self.state.p & flags::CARRY) != 0 { 1u16 } else { 0u16 };
-        let a = self.state.a as u16;
-        let b = val as u16;
-        let sum = a + b + carry;
+        if (self.state.p & flags::DECIMAL) != 0 {
+            let carry = if (self.state.p & flags::CARRY) != 0 { 1u16 } else { 0u16 };
+            let a = self.state.a as u16;
+            let b = val as u16;
+            let bin_sum = a + b + carry;
+            let overflow = (!((a ^ b) & 0x80) & ((a ^ (bin_sum as u8 as u16)) & 0x80)) != 0;
+            if overflow {
+                self.state.p |= flags::OVERFLOW;
+            } else {
+                self.state.p &= !flags::OVERFLOW;
+            }
 
-        let overflow = (!((a ^ b) & 0x80) & ((a ^ sum) & 0x80)) != 0;
-        if overflow {
-            self.state.p |= flags::OVERFLOW;
+            let mut lo = (a & 0x0F) + (b & 0x0F) + carry;
+            let mut hi = (a >> 4) + (b >> 4);
+            if lo > 9 {
+                lo += 6;
+                hi += 1;
+            }
+            if hi > 9 {
+                hi += 6;
+            }
+            if hi > 15 {
+                self.state.p |= flags::CARRY;
+            } else {
+                self.state.p &= !flags::CARRY;
+            }
+            let res = ((hi as u8) << 4) | ((lo as u8) & 0x0F);
+            self.state.a = res;
+            self.state.update_zn(self.state.a);
         } else {
-            self.state.p &= !flags::OVERFLOW;
-        }
+            let carry = if (self.state.p & flags::CARRY) != 0 { 1u16 } else { 0u16 };
+            let a = self.state.a as u16;
+            let b = val as u16;
+            let sum = a + b + carry;
 
-        if sum > 0xFF {
-            self.state.p |= flags::CARRY;
-        } else {
-            self.state.p &= !flags::CARRY;
-        }
+            let overflow = (!((a ^ b) & 0x80) & ((a ^ sum) & 0x80)) != 0;
+            if overflow {
+                self.state.p |= flags::OVERFLOW;
+            } else {
+                self.state.p &= !flags::OVERFLOW;
+            }
 
-        self.state.a = (sum & 0xFF) as u8;
-        self.state.update_zn(self.state.a);
+            if sum > 0xFF {
+                self.state.p |= flags::CARRY;
+            } else {
+                self.state.p &= !flags::CARRY;
+            }
+
+            self.state.a = (sum & 0xFF) as u8;
+            self.state.update_zn(self.state.a);
+        }
     }
 
     fn op_sbc(&mut self, val: u8) {
-        self.op_adc(!val);
+        if (self.state.p & flags::DECIMAL) != 0 {
+            let carry = if (self.state.p & flags::CARRY) != 0 { 0u16 } else { 1u16 };
+            let a = self.state.a as u16;
+            let b = val as u16;
+            let bin_diff = a.wrapping_sub(b).wrapping_sub(carry);
+            let overflow = (((a ^ b) & 0x80) & ((a ^ bin_diff) & 0x80)) != 0;
+            if overflow {
+                self.state.p |= flags::OVERFLOW;
+            } else {
+                self.state.p &= !flags::OVERFLOW;
+            }
+
+            let mut lo = (a & 0x0F) as i16 - (b & 0x0F) as i16 - carry as i16;
+            let mut hi = (a >> 4) as i16 - (b >> 4) as i16;
+            if lo < 0 {
+                lo -= 6;
+                hi -= 1;
+            }
+            if hi < 0 {
+                hi -= 6;
+            }
+            if bin_diff < 0x100 {
+                self.state.p |= flags::CARRY;
+            } else {
+                self.state.p &= !flags::CARRY;
+            }
+            let res = ((hi as u8) << 4) | ((lo as u8) & 0x0F);
+            self.state.a = res;
+            self.state.update_zn(self.state.a);
+        } else {
+            self.op_adc(!val);
+        }
     }
 
     fn op_cmp(&mut self, reg_val: u8, val: u8) {
@@ -731,7 +793,8 @@ impl CpuEngine for Mos6502Cpu {
 
             // --- AND / ORA / EOR ---
             0x29 => {
-                self.state.a &= self.read_imm(bus)?;
+                let v = self.read_imm(bus)?;
+                self.state.a &= v;
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
@@ -741,14 +804,46 @@ impl CpuEngine for Mos6502Cpu {
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 3 })
             }
+            0x35 => {
+                let addr = self.addr_zpx(bus)?;
+                self.state.a &= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
             0x2D => {
                 let addr = self.addr_abs(bus)?;
                 self.state.a &= bus.read_u8(addr as u64)?;
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 4 })
             }
+            0x3D => {
+                let addr = self.addr_absx(bus)?;
+                self.state.a &= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x39 => {
+                let addr = self.addr_absy(bus)?;
+                self.state.a &= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x21 => {
+                let addr = self.addr_indx(bus)?;
+                self.state.a &= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x31 => {
+                let addr = self.addr_indy(bus)?;
+                self.state.a &= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 5 })
+            }
+
             0x09 => {
-                self.state.a |= self.read_imm(bus)?;
+                let v = self.read_imm(bus)?;
+                self.state.a |= v;
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
@@ -758,14 +853,46 @@ impl CpuEngine for Mos6502Cpu {
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 3 })
             }
+            0x15 => {
+                let addr = self.addr_zpx(bus)?;
+                self.state.a |= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
             0x0D => {
                 let addr = self.addr_abs(bus)?;
                 self.state.a |= bus.read_u8(addr as u64)?;
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 4 })
             }
+            0x1D => {
+                let addr = self.addr_absx(bus)?;
+                self.state.a |= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x19 => {
+                let addr = self.addr_absy(bus)?;
+                self.state.a |= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x01 => {
+                let addr = self.addr_indx(bus)?;
+                self.state.a |= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x11 => {
+                let addr = self.addr_indy(bus)?;
+                self.state.a |= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 5 })
+            }
+
             0x49 => {
-                self.state.a ^= self.read_imm(bus)?;
+                let v = self.read_imm(bus)?;
+                self.state.a ^= v;
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
@@ -775,11 +902,41 @@ impl CpuEngine for Mos6502Cpu {
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 3 })
             }
+            0x55 => {
+                let addr = self.addr_zpx(bus)?;
+                self.state.a ^= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
             0x4D => {
                 let addr = self.addr_abs(bus)?;
                 self.state.a ^= bus.read_u8(addr as u64)?;
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x5D => {
+                let addr = self.addr_absx(bus)?;
+                self.state.a ^= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x59 => {
+                let addr = self.addr_absy(bus)?;
+                self.state.a ^= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0x41 => {
+                let addr = self.addr_indx(bus)?;
+                self.state.a ^= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x51 => {
+                let addr = self.addr_indy(bus)?;
+                self.state.a ^= bus.read_u8(addr as u64)?;
+                self.state.update_zn(self.state.a);
+                Ok(StepOutcome::Continue { cycles: 5 })
             }
 
             // --- BIT ---
@@ -814,12 +971,26 @@ impl CpuEngine for Mos6502Cpu {
                 self.state.update_zn(v);
                 Ok(StepOutcome::Continue { cycles: 5 })
             }
+            0xF6 => {
+                let addr = self.addr_zpx(bus)?;
+                let v = bus.read_u8(addr as u64)?.wrapping_add(1);
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
             0xEE => {
                 let addr = self.addr_abs(bus)?;
                 let v = bus.read_u8(addr as u64)?.wrapping_add(1);
                 bus.write_u8(addr as u64, v)?;
                 self.state.update_zn(v);
                 Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0xFE => {
+                let addr = self.addr_absx(bus)?;
+                let v = bus.read_u8(addr as u64)?.wrapping_add(1);
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 7 })
             }
             0xC6 => {
                 let addr = self.addr_zp(bus)?;
@@ -828,12 +999,26 @@ impl CpuEngine for Mos6502Cpu {
                 self.state.update_zn(v);
                 Ok(StepOutcome::Continue { cycles: 5 })
             }
+            0xD6 => {
+                let addr = self.addr_zpx(bus)?;
+                let v = bus.read_u8(addr as u64)?.wrapping_sub(1);
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
             0xCE => {
                 let addr = self.addr_abs(bus)?;
                 let v = bus.read_u8(addr as u64)?.wrapping_sub(1);
                 bus.write_u8(addr as u64, v)?;
                 self.state.update_zn(v);
                 Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0xDE => {
+                let addr = self.addr_absx(bus)?;
+                let v = bus.read_u8(addr as u64)?.wrapping_sub(1);
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 7 })
             }
             0xE8 => {
                 // INX
@@ -873,6 +1058,51 @@ impl CpuEngine for Mos6502Cpu {
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
+            0x06 => {
+                // ASL zp
+                let addr = self.addr_zp(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let bit7 = (v & 0x80) != 0;
+                v <<= 1;
+                if bit7 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 5 })
+            }
+            0x16 => {
+                // ASL zpx
+                let addr = self.addr_zpx(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let bit7 = (v & 0x80) != 0;
+                v <<= 1;
+                if bit7 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x0E => {
+                // ASL abs
+                let addr = self.addr_abs(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let bit7 = (v & 0x80) != 0;
+                v <<= 1;
+                if bit7 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x1E => {
+                // ASL absx
+                let addr = self.addr_absx(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let bit7 = (v & 0x80) != 0;
+                v <<= 1;
+                if bit7 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 7 })
+            }
+
             0x4A => {
                 // LSR A
                 let bit0 = (self.state.a & 0x01) != 0;
@@ -885,6 +1115,51 @@ impl CpuEngine for Mos6502Cpu {
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
+            0x46 => {
+                // LSR zp
+                let addr = self.addr_zp(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let bit0 = (v & 0x01) != 0;
+                v >>= 1;
+                if bit0 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 5 })
+            }
+            0x56 => {
+                // LSR zpx
+                let addr = self.addr_zpx(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let bit0 = (v & 0x01) != 0;
+                v >>= 1;
+                if bit0 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x4E => {
+                // LSR abs
+                let addr = self.addr_abs(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let bit0 = (v & 0x01) != 0;
+                v >>= 1;
+                if bit0 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x5E => {
+                // LSR absx
+                let addr = self.addr_absx(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let bit0 = (v & 0x01) != 0;
+                v >>= 1;
+                if bit0 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 7 })
+            }
+
             0x2A => {
                 // ROL A
                 let old_c = if (self.state.p & flags::CARRY) != 0 { 1 } else { 0 };
@@ -898,6 +1173,55 @@ impl CpuEngine for Mos6502Cpu {
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
+            0x26 => {
+                // ROL zp
+                let addr = self.addr_zp(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let old_c = if (self.state.p & flags::CARRY) != 0 { 1 } else { 0 };
+                let bit7 = (v & 0x80) != 0;
+                v = (v << 1) | old_c;
+                if bit7 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 5 })
+            }
+            0x36 => {
+                // ROL zpx
+                let addr = self.addr_zpx(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let old_c = if (self.state.p & flags::CARRY) != 0 { 1 } else { 0 };
+                let bit7 = (v & 0x80) != 0;
+                v = (v << 1) | old_c;
+                if bit7 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x2E => {
+                // ROL abs
+                let addr = self.addr_abs(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let old_c = if (self.state.p & flags::CARRY) != 0 { 1 } else { 0 };
+                let bit7 = (v & 0x80) != 0;
+                v = (v << 1) | old_c;
+                if bit7 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x3E => {
+                // ROL absx
+                let addr = self.addr_absx(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let old_c = if (self.state.p & flags::CARRY) != 0 { 1 } else { 0 };
+                let bit7 = (v & 0x80) != 0;
+                v = (v << 1) | old_c;
+                if bit7 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 7 })
+            }
+
             0x6A => {
                 // ROR A
                 let old_c = if (self.state.p & flags::CARRY) != 0 { 0x80 } else { 0 };
@@ -910,6 +1234,54 @@ impl CpuEngine for Mos6502Cpu {
                 }
                 self.state.update_zn(self.state.a);
                 Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x66 => {
+                // ROR zp
+                let addr = self.addr_zp(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let old_c = if (self.state.p & flags::CARRY) != 0 { 0x80 } else { 0 };
+                let bit0 = (v & 0x01) != 0;
+                v = (v >> 1) | old_c;
+                if bit0 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 5 })
+            }
+            0x76 => {
+                // ROR zpx
+                let addr = self.addr_zpx(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let old_c = if (self.state.p & flags::CARRY) != 0 { 0x80 } else { 0 };
+                let bit0 = (v & 0x01) != 0;
+                v = (v >> 1) | old_c;
+                if bit0 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x6E => {
+                // ROR abs
+                let addr = self.addr_abs(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let old_c = if (self.state.p & flags::CARRY) != 0 { 0x80 } else { 0 };
+                let bit0 = (v & 0x01) != 0;
+                v = (v >> 1) | old_c;
+                if bit0 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 6 })
+            }
+            0x7E => {
+                // ROR absx
+                let addr = self.addr_absx(bus)?;
+                let mut v = bus.read_u8(addr as u64)?;
+                let old_c = if (self.state.p & flags::CARRY) != 0 { 0x80 } else { 0 };
+                let bit0 = (v & 0x01) != 0;
+                v = (v >> 1) | old_c;
+                if bit0 { self.state.p |= flags::CARRY; } else { self.state.p &= !flags::CARRY; }
+                bus.write_u8(addr as u64, v)?;
+                self.state.update_zn(v);
+                Ok(StepOutcome::Continue { cycles: 7 })
             }
 
             // --- Jumps & Calls ---
@@ -1048,6 +1420,28 @@ impl CpuEngine for Mos6502Cpu {
                 // SED
                 self.state.p |= flags::DECIMAL;
                 Ok(StepOutcome::Continue { cycles: 2 })
+            }
+
+            // --- Unofficial SBC (0xEB) ---
+            0xEB => {
+                let v = self.read_imm(bus)?;
+                self.op_sbc(v);
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+
+            // --- 1-byte NOPs ---
+            0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => Ok(StepOutcome::Continue { cycles: 2 }),
+
+            // --- 2-byte NOPs (DOP: ignores immediate/zp byte) ---
+            0x04 | 0x14 | 0x34 | 0x44 | 0x54 | 0x64 | 0x74 | 0x80 | 0x82 | 0x89 | 0xC2 | 0xD4 | 0xE2 | 0xF4 => {
+                let _ = self.read_imm(bus)?;
+                Ok(StepOutcome::Continue { cycles: 3 })
+            }
+
+            // --- 3-byte NOPs (TOP: ignores 16-bit operand) ---
+            0x0C | 0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => {
+                let _ = self.read_u16_pc(bus)?;
+                Ok(StepOutcome::Continue { cycles: 4 })
             }
 
             _ => Err(CpuError::InvalidInstruction {

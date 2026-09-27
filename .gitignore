@@ -1,1 +1,6 @@
 /target
+
+# common JetBrains created directories
+.junie
+.idea
+.venv

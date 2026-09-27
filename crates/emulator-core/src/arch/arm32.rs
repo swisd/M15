@@ -29,6 +29,26 @@ impl Arm32Cpu {
         cpu
     }
 
+    pub fn get_reg(&self, reg: usize) -> u32 {
+        match reg {
+            0..=12 => self.state.r[reg],
+            13 => self.state.sp,
+            14 => self.state.lr,
+            15 => self.state.pc,
+            _ => 0,
+        }
+    }
+
+    pub fn set_reg(&mut self, reg: usize, val: u32) {
+        match reg {
+            0..=12 => self.state.r[reg] = val,
+            13 => self.state.sp = val,
+            14 => self.state.lr = val,
+            15 => self.state.pc = val,
+            _ => {}
+        }
+    }
+
     pub fn push_u32(&mut self, bus: &mut dyn MemoryBus, val: u32) -> Result<(), CpuError> {
         self.state.sp = self.state.sp.wrapping_sub(4);
         bus.write_u32(self.state.sp as u64, val, Endianness::LittleEndian)?;
@@ -108,9 +128,16 @@ impl CpuEngine for Arm32Cpu {
                 Ok(StepOutcome::Breakpoint)
             }
             _ => {
-                // Simple B / BL or generic instruction dispatch fallback
-                if (instr & 0xFF000000) == 0xEA000000 {
-                    // B imm24
+                // BX Rm (0xE12FFF1m)
+                if (instr & 0xFFFFFFF0) == 0xE12FFF10 {
+                    let rm = (instr & 0x0F) as usize;
+                    self.state.pc = self.get_reg(rm);
+                    return Ok(StepOutcome::Continue { cycles: 3 });
+                }
+
+                // B / BL (0xEAxxxxxx / 0xEBxxxxxx)
+                if (instr & 0xFE000000) == 0xEA000000 {
+                    let is_bl = (instr & 0x01000000) != 0;
                     let imm24 = instr & 0x00FFFFFF;
                     let sign_ext = if imm24 & 0x00800000 != 0 {
                         imm24 | 0xFF000000
@@ -118,14 +145,98 @@ impl CpuEngine for Arm32Cpu {
                         imm24
                     };
                     let offset = (sign_ext as i32) << 2;
+                    if is_bl {
+                        self.state.lr = self.state.pc;
+                    }
                     self.state.pc = ((self.state.pc as i32).wrapping_add(offset)) as u32;
-                    Ok(StepOutcome::Continue { cycles: 3 })
-                } else {
-                    Err(CpuError::InvalidInstruction {
-                        opcode: instr as u64,
-                        pc,
-                    })
+                    return Ok(StepOutcome::Continue { cycles: 3 });
                 }
+
+                // Data processing (0xE0xxxxxx .. 0xE3xxxxxx)
+                if (instr & 0xFC000000) == 0xE0000000 {
+                    let is_imm = (instr & 0x02000000) != 0;
+                    let op = (instr >> 21) & 0x0F;
+                    let _s_bit = (instr & 0x00100000) != 0;
+                    let rn = ((instr >> 16) & 0x0F) as usize;
+                    let rd = ((instr >> 12) & 0x0F) as usize;
+                    let op2 = if is_imm {
+                        let imm8 = instr & 0xFF;
+                        let rot = ((instr >> 8) & 0x0F) * 2;
+                        imm8.rotate_right(rot)
+                    } else {
+                        let rm = (instr & 0x0F) as usize;
+                        self.get_reg(rm)
+                    };
+                    let rn_val = self.get_reg(rn);
+
+                    match op {
+                        0x0 => { // AND
+                            let res = rn_val & op2;
+                            self.set_reg(rd, res);
+                        }
+                        0x1 => { // EOR
+                            let res = rn_val ^ op2;
+                            self.set_reg(rd, res);
+                        }
+                        0x2 => { // SUB
+                            let res = rn_val.wrapping_sub(op2);
+                            self.set_reg(rd, res);
+                        }
+                        0x4 => { // ADD
+                            let res = rn_val.wrapping_add(op2);
+                            self.set_reg(rd, res);
+                        }
+                        0xA => { // CMP
+                            let res = rn_val.wrapping_sub(op2);
+                            if res == 0 { self.state.cpsr |= 0x4000_0000; } else { self.state.cpsr &= !0x4000_0000; }
+                            if (res as i32) < 0 { self.state.cpsr |= 0x8000_0000; } else { self.state.cpsr &= !0x8000_0000; }
+                        }
+                        0xC => { // ORR
+                            let res = rn_val | op2;
+                            self.set_reg(rd, res);
+                        }
+                        0xD => { // MOV
+                            self.set_reg(rd, op2);
+                        }
+                        0xE => { // BIC
+                            let res = rn_val & !op2;
+                            self.set_reg(rd, res);
+                        }
+                        0xF => { // MVN
+                            let res = !op2;
+                            self.set_reg(rd, res);
+                        }
+                        _ => {}
+                    }
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // LDR / STR (0xE4xxxxxx .. 0xE5xxxxxx)
+                if (instr & 0xFC000000) == 0xE4000000 || (instr & 0xFC000000) == 0xE5000000 {
+                    let is_load = (instr & 0x00100000) != 0;
+                    let is_up = (instr & 0x00800000) != 0;
+                    let rn = ((instr >> 16) & 0x0F) as usize;
+                    let rd = ((instr >> 12) & 0x0F) as usize;
+                    let offset = instr & 0xFFF;
+                    let addr = if is_up {
+                        self.get_reg(rn).wrapping_add(offset)
+                    } else {
+                        self.get_reg(rn).wrapping_sub(offset)
+                    };
+                    if is_load {
+                        let val = bus.read_u32(addr as u64, Endianness::LittleEndian)?;
+                        self.set_reg(rd, val);
+                    } else {
+                        let val = self.get_reg(rd);
+                        bus.write_u32(addr as u64, val, Endianness::LittleEndian)?;
+                    }
+                    return Ok(StepOutcome::Continue { cycles: 3 });
+                }
+
+                Err(CpuError::InvalidInstruction {
+                    opcode: instr as u64,
+                    pc,
+                })
             }
         }
     }

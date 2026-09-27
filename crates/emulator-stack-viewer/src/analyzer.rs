@@ -78,32 +78,44 @@ pub fn analyze_stack<B: MemoryBus + ?Sized>(
     let expected_alignment = standard_stack_alignment(arch);
     let is_aligned = (sp as usize).is_multiple_of(expected_alignment);
 
-    let base_addr = options.custom_base_addr.unwrap_or(sp);
+    let anchor = if options.lock_to_sp {
+        sp
+    } else {
+        options.custom_base_addr.unwrap_or(sp)
+    };
+
+    let base_addr = match growth {
+        StackGrowth::Downwards => {
+            anchor.wrapping_add((options.scroll_offset_slots * word_size as i64) as u64)
+        }
+        StackGrowth::Upwards => {
+            anchor.wrapping_sub((options.scroll_offset_slots * word_size as i64) as u64)
+        }
+    };
+
     let mut entries = Vec::with_capacity(options.slot_count);
+    let above_sp_count = options.slots_above_sp.min(options.slot_count);
 
     for i in 0..options.slot_count {
+        let slot_idx = (i as isize) - (above_sp_count as isize);
         let (addr, offset_from_sp) = match growth {
             StackGrowth::Downwards => {
-                let offset = (i * word_size) as u64;
-                (
-                    base_addr.wrapping_add(offset),
-                    (base_addr.wrapping_add(offset) as i64) - (sp as i64),
-                )
+                let offset_bytes = slot_idx * (word_size as isize);
+                let a = base_addr.wrapping_add(offset_bytes as u64);
+                (a, (a as i64) - (sp as i64))
             }
             StackGrowth::Upwards => {
-                let offset = (i * word_size) as u64;
-                (
-                    base_addr.wrapping_sub(offset),
-                    (sp as i64) - (base_addr.wrapping_sub(offset) as i64),
-                )
+                let offset_bytes = slot_idx * (word_size as isize);
+                let a = base_addr.wrapping_sub(offset_bytes as u64);
+                (a, (sp as i64) - (a as i64))
             }
         };
 
         let mut raw = [0u8; 8];
         let read_res = bus.read_bytes(addr, &mut raw[..word_size]);
         if read_res.is_err() {
-            // Memory read failed / end of mapped memory
-            break;
+            // Unmapped memory - record 0-byte entry or continue
+            raw = [0u8; 8];
         }
 
         let value = match word_size {
@@ -136,6 +148,17 @@ pub fn analyze_stack<B: MemoryBus + ?Sized>(
         }
         if is_fp {
             annotations.push(String::from("[FP] Frame Pointer"));
+        }
+        if !is_sp && !is_fp {
+            match growth {
+                StackGrowth::Downwards if (addr as i64) < (sp as i64) => {
+                    annotations.push(String::from("[Above SP / Free]"));
+                }
+                StackGrowth::Upwards if (addr as i64) > (sp as i64) => {
+                    annotations.push(String::from("[Above SP / Free]"));
+                }
+                _ => {}
+            }
         }
 
         let annotation = if annotations.is_empty() {

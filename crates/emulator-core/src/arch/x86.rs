@@ -51,6 +51,76 @@ impl X86Cpu {
         self.state.esp = self.state.esp.wrapping_add(4);
         Ok(val)
     }
+
+    pub fn get_reg32(&self, reg: u8) -> u32 {
+        match reg & 7 {
+            0 => self.state.eax,
+            1 => self.state.ecx,
+            2 => self.state.edx,
+            3 => self.state.ebx,
+            4 => self.state.esp,
+            5 => self.state.ebp,
+            6 => self.state.esi,
+            7 => self.state.edi,
+            _ => 0,
+        }
+    }
+
+    pub fn set_reg32(&mut self, reg: u8, val: u32) {
+        match reg & 7 {
+            0 => self.state.eax = val,
+            1 => self.state.ecx = val,
+            2 => self.state.edx = val,
+            3 => self.state.ebx = val,
+            4 => self.state.esp = val,
+            5 => self.state.ebp = val,
+            6 => self.state.esi = val,
+            7 => self.state.edi = val,
+            _ => {}
+        }
+    }
+
+    fn update_flags_logic(&mut self, val: u32) {
+        self.state.eflags &= !(0x40 | 0x80 | 0x01 | 0x800);
+        if val == 0 {
+            self.state.eflags |= 0x40; // ZF
+        }
+        if (val as i32) < 0 {
+            self.state.eflags |= 0x80; // SF
+        }
+    }
+
+    fn update_flags_add(&mut self, a: u32, b: u32, res: u32) {
+        self.state.eflags &= !(0x40 | 0x80 | 0x01 | 0x800);
+        if res == 0 {
+            self.state.eflags |= 0x40; // ZF
+        }
+        if (res as i32) < 0 {
+            self.state.eflags |= 0x80; // SF
+        }
+        if (res as u64) < (a as u64) {
+            self.state.eflags |= 0x01; // CF
+        }
+        if ((a ^ res) & (b ^ res) & 0x8000_0000) != 0 {
+            self.state.eflags |= 0x800; // OF
+        }
+    }
+
+    fn update_flags_sub(&mut self, a: u32, b: u32, res: u32) {
+        self.state.eflags &= !(0x40 | 0x80 | 0x01 | 0x800);
+        if res == 0 {
+            self.state.eflags |= 0x40; // ZF
+        }
+        if (res as i32) < 0 {
+            self.state.eflags |= 0x80; // SF
+        }
+        if a < b {
+            self.state.eflags |= 0x01; // CF
+        }
+        if ((a ^ b) & (a ^ res) & 0x8000_0000) != 0 {
+            self.state.eflags |= 0x800; // OF
+        }
+    }
 }
 
 impl CpuEngine for X86Cpu {
@@ -120,15 +190,203 @@ impl CpuEngine for X86Cpu {
                 self.state.halted = true;
                 Ok(StepOutcome::Halted)
             }
-            0x50 => {
-                // PUSH EAX
-                let eax = self.state.eax;
-                self.push_u32(bus, eax)?;
+            0xCC => {
+                // INT 3
+                Ok(StepOutcome::Breakpoint)
+            }
+            0xCD => {
+                // INT imm8
+                let vector = bus.read_u8(self.pc())? as u32;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                Ok(StepOutcome::Interrupt(vector))
+            }
+            0x50..=0x57 => {
+                // PUSH r32
+                let reg = opcode - 0x50;
+                let val = self.get_reg32(reg);
+                self.push_u32(bus, val)?;
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
-            0x58 => {
-                // POP EAX
-                self.state.eax = self.pop_u32(bus)?;
+            0x58..=0x5F => {
+                // POP r32
+                let reg = opcode - 0x58;
+                let val = self.pop_u32(bus)?;
+                self.set_reg32(reg, val);
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x68 => {
+                // PUSH imm32
+                let imm = bus.read_u32(self.pc(), Endianness::LittleEndian)?;
+                self.state.eip = self.state.eip.wrapping_add(4);
+                self.push_u32(bus, imm)?;
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x6A => {
+                // PUSH imm8 (sign-extended)
+                let imm = (bus.read_u8(self.pc())? as i8) as i32 as u32;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                self.push_u32(bus, imm)?;
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0xB8..=0xBF => {
+                // MOV r32, imm32
+                let reg = opcode - 0xB8;
+                let val = bus.read_u32(self.pc(), Endianness::LittleEndian)?;
+                self.state.eip = self.state.eip.wrapping_add(4);
+                self.set_reg32(reg, val);
+                Ok(StepOutcome::Continue { cycles: 1 })
+            }
+            0x89 => {
+                // MOV r/m32, r32
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let val = self.get_reg32(reg);
+                if (modrm >> 6) == 3 {
+                    self.set_reg32(rm, val);
+                } else {
+                    let addr = self.get_reg32(rm) as u64;
+                    bus.write_u32(addr, val, Endianness::LittleEndian)?;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x8B => {
+                // MOV r32, r/m32
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let val = if (modrm >> 6) == 3 {
+                    self.get_reg32(rm)
+                } else {
+                    let addr = self.get_reg32(rm) as u64;
+                    bus.read_u32(addr, Endianness::LittleEndian)?
+                };
+                self.set_reg32(reg, val);
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x01 => {
+                // ADD r/m32, r32
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let r_val = self.get_reg32(reg);
+                let rm_val = self.get_reg32(rm);
+                let res = rm_val.wrapping_add(r_val);
+                self.update_flags_add(rm_val, r_val, res);
+                if (modrm >> 6) == 3 {
+                    self.set_reg32(rm, res);
+                } else {
+                    let addr = self.get_reg32(rm) as u64;
+                    bus.write_u32(addr, res, Endianness::LittleEndian)?;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x03 => {
+                // ADD r32, r/m32
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let rm_val = if (modrm >> 6) == 3 {
+                    self.get_reg32(rm)
+                } else {
+                    let addr = self.get_reg32(rm) as u64;
+                    bus.read_u32(addr, Endianness::LittleEndian)?
+                };
+                let r_val = self.get_reg32(reg);
+                let res = r_val.wrapping_add(rm_val);
+                self.update_flags_add(r_val, rm_val, res);
+                self.set_reg32(reg, res);
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x29 => {
+                // SUB r/m32, r32
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let r_val = self.get_reg32(reg);
+                let rm_val = self.get_reg32(rm);
+                let res = rm_val.wrapping_sub(r_val);
+                self.update_flags_sub(rm_val, r_val, res);
+                if (modrm >> 6) == 3 {
+                    self.set_reg32(rm, res);
+                } else {
+                    let addr = self.get_reg32(rm) as u64;
+                    bus.write_u32(addr, res, Endianness::LittleEndian)?;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x2B => {
+                // SUB r32, r/m32
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let rm_val = if (modrm >> 6) == 3 {
+                    self.get_reg32(rm)
+                } else {
+                    let addr = self.get_reg32(rm) as u64;
+                    bus.read_u32(addr, Endianness::LittleEndian)?
+                };
+                let r_val = self.get_reg32(reg);
+                let res = r_val.wrapping_sub(rm_val);
+                self.update_flags_sub(r_val, rm_val, res);
+                self.set_reg32(reg, res);
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x31 => {
+                // XOR r/m32, r32
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let r_val = self.get_reg32(reg);
+                let rm_val = self.get_reg32(rm);
+                let res = rm_val ^ r_val;
+                self.update_flags_logic(res);
+                if (modrm >> 6) == 3 {
+                    self.set_reg32(rm, res);
+                } else {
+                    let addr = self.get_reg32(rm) as u64;
+                    bus.write_u32(addr, res, Endianness::LittleEndian)?;
+                }
+                Ok(StepOutcome::Continue { cycles: 1 })
+            }
+            0x39 => {
+                // CMP r/m32, r32
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let r_val = self.get_reg32(reg);
+                let rm_val = self.get_reg32(rm);
+                let res = rm_val.wrapping_sub(r_val);
+                self.update_flags_sub(rm_val, r_val, res);
+                Ok(StepOutcome::Continue { cycles: 1 })
+            }
+            0xC3 => {
+                // RET
+                self.state.eip = self.pop_u32(bus)?;
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0xE8 => {
+                // CALL rel32
+                let rel = bus.read_u32(self.pc(), Endianness::LittleEndian)? as i32;
+                self.state.eip = self.state.eip.wrapping_add(4);
+                let ret_addr = self.state.eip;
+                self.push_u32(bus, ret_addr)?;
+                self.state.eip = (self.state.eip as i32).wrapping_add(rel) as u32;
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0xE9 => {
+                // JMP rel32
+                let rel = bus.read_u32(self.pc(), Endianness::LittleEndian)? as i32;
+                self.state.eip = self.state.eip.wrapping_add(4);
+                self.state.eip = (self.state.eip as i32).wrapping_add(rel) as u32;
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
             0xEB => {
@@ -138,9 +396,23 @@ impl CpuEngine for X86Cpu {
                 self.state.eip = (self.state.eip as i32).wrapping_add(rel as i32) as u32;
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
-            0xCC => {
-                // INT 3
-                Ok(StepOutcome::Breakpoint)
+            0x74 => {
+                // JZ / JE rel8
+                let rel = bus.read_u8(self.pc())? as i8;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                if (self.state.eflags & 0x40) != 0 {
+                    self.state.eip = (self.state.eip as i32).wrapping_add(rel as i32) as u32;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x75 => {
+                // JNZ / JNE rel8
+                let rel = bus.read_u8(self.pc())? as i8;
+                self.state.eip = self.state.eip.wrapping_add(1);
+                if (self.state.eflags & 0x40) == 0 {
+                    self.state.eip = (self.state.eip as i32).wrapping_add(rel as i32) as u32;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
             }
             _ => Err(CpuError::InvalidInstruction {
                 opcode: opcode as u64,

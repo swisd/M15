@@ -28,6 +28,20 @@ impl Arm64Cpu {
         cpu
     }
 
+    pub fn get_x(&self, reg: usize) -> u64 {
+        if reg < 31 {
+            self.state.x[reg]
+        } else {
+            0
+        }
+    }
+
+    pub fn set_x(&mut self, reg: usize, val: u64) {
+        if reg < 31 {
+            self.state.x[reg] = val;
+        }
+    }
+
     pub fn push_u64(&mut self, bus: &mut dyn MemoryBus, val: u64) -> Result<(), CpuError> {
         self.state.sp = self.state.sp.wrapping_sub(8);
         bus.write_u64(self.state.sp, val, Endianness::LittleEndian)?;
@@ -107,13 +121,28 @@ impl CpuEngine for Arm64Cpu {
                 self.state.pc = self.state.x[30];
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
-            0xD4200000 => {
-                // BRK 0
-                Ok(StepOutcome::Breakpoint)
-            }
             _ => {
-                // Check for B imm26 (0x14000000)
-                if (instr & 0xFC000000) == 0x14000000 {
+                // RET Rn (0xD65F0000 | (rn << 5))
+                if (instr & 0xFFFFFC1F) == 0xD65F0000 {
+                    let rn = ((instr >> 5) & 0x1F) as usize;
+                    self.state.pc = self.get_x(rn);
+                    return Ok(StepOutcome::Continue { cycles: 2 });
+                }
+
+                // BRK (0xD4200000..=0xD43FFFFF)
+                if (instr & 0xFFE00000) == 0xD4200000 {
+                    return Ok(StepOutcome::Breakpoint);
+                }
+
+                // SVC (0xD4000001..=0xD401FFFF)
+                if (instr & 0xFFE0001F) == 0xD4000001 {
+                    let imm16 = (instr >> 5) & 0xFFFF;
+                    return Ok(StepOutcome::Interrupt(imm16));
+                }
+
+                // B / BL (0x14000000 / 0x94000000)
+                if (instr & 0x7C000000) == 0x14000000 {
+                    let is_bl = (instr & 0x80000000) != 0;
                     let imm26 = instr & 0x03FFFFFF;
                     let sign_ext = if imm26 & 0x02000000 != 0 {
                         imm26 | 0xFC000000
@@ -121,14 +150,88 @@ impl CpuEngine for Arm64Cpu {
                         imm26
                     };
                     let offset = ((sign_ext as i32) as i64) << 2;
+                    if is_bl {
+                        self.state.x[30] = self.state.pc;
+                    }
                     self.state.pc = ((self.state.pc as i64).wrapping_add(offset)) as u64;
-                    Ok(StepOutcome::Continue { cycles: 2 })
-                } else {
-                    Err(CpuError::InvalidInstruction {
-                        opcode: instr as u64,
-                        pc,
-                    })
+                    return Ok(StepOutcome::Continue { cycles: 2 });
                 }
+
+                // MOVZ Xd, #imm16, LSL #hw (0xD2800000..=0xD29FFFFF)
+                if (instr & 0xFF800000) == 0xD2800000 {
+                    let hw = (((instr >> 21) & 3) * 16) as u32;
+                    let imm16 = ((instr >> 5) & 0xFFFF) as u64;
+                    let rd = (instr & 0x1F) as usize;
+                    self.set_x(rd, imm16 << hw);
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // ADD Xd, Xn, Xm (0x8B000000..=0x8B1FFFFF)
+                if (instr & 0xFF200000) == 0x8B000000 {
+                    let rm = ((instr >> 16) & 0x1F) as usize;
+                    let rn = ((instr >> 5) & 0x1F) as usize;
+                    let rd = (instr & 0x1F) as usize;
+                    self.set_x(rd, self.get_x(rn).wrapping_add(self.get_x(rm)));
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // ADD Xd, Xn, #imm12 (0x91000000..=0x913FFFFF)
+                if (instr & 0xFF800000) == 0x91000000 {
+                    let imm12 = ((instr >> 10) & 0xFFF) as u64;
+                    let rn = ((instr >> 5) & 0x1F) as usize;
+                    let rd = (instr & 0x1F) as usize;
+                    let rn_val = if rn == 31 { self.state.sp } else { self.get_x(rn) };
+                    let res = rn_val.wrapping_add(imm12);
+                    if rd == 31 { self.state.sp = res; } else { self.set_x(rd, res); }
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // SUB Xd, Xn, Xm (0xCB000000..=0xCB1FFFFF)
+                if (instr & 0xFF200000) == 0xCB000000 {
+                    let rm = ((instr >> 16) & 0x1F) as usize;
+                    let rn = ((instr >> 5) & 0x1F) as usize;
+                    let rd = (instr & 0x1F) as usize;
+                    self.set_x(rd, self.get_x(rn).wrapping_sub(self.get_x(rm)));
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // SUB Xd, Xn, #imm12 (0xD1000000..=0xD13FFFFF)
+                if (instr & 0xFF800000) == 0xD1000000 {
+                    let imm12 = ((instr >> 10) & 0xFFF) as u64;
+                    let rn = ((instr >> 5) & 0x1F) as usize;
+                    let rd = (instr & 0x1F) as usize;
+                    let rn_val = if rn == 31 { self.state.sp } else { self.get_x(rn) };
+                    let res = rn_val.wrapping_sub(imm12);
+                    if rd == 31 { self.state.sp = res; } else { self.set_x(rd, res); }
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // LDR Xd, [Xn, #pimm] (0xF9400000..=0xF97FFFFF)
+                if (instr & 0xFFC00000) == 0xF9400000 {
+                    let pimm = (((instr >> 10) & 0xFFF) as u64) * 8;
+                    let rn = ((instr >> 5) & 0x1F) as usize;
+                    let rd = (instr & 0x1F) as usize;
+                    let addr = (if rn == 31 { self.state.sp } else { self.get_x(rn) }).wrapping_add(pimm);
+                    let val = bus.read_u64(addr, Endianness::LittleEndian)?;
+                    self.set_x(rd, val);
+                    return Ok(StepOutcome::Continue { cycles: 3 });
+                }
+
+                // STR Xd, [Xn, #pimm] (0xF9000000..=0xF93FFFFF)
+                if (instr & 0xFFC00000) == 0xF9000000 {
+                    let pimm = (((instr >> 10) & 0xFFF) as u64) * 8;
+                    let rn = ((instr >> 5) & 0x1F) as usize;
+                    let rd = (instr & 0x1F) as usize;
+                    let addr = (if rn == 31 { self.state.sp } else { self.get_x(rn) }).wrapping_add(pimm);
+                    let val = self.get_x(rd);
+                    bus.write_u64(addr, val, Endianness::LittleEndian)?;
+                    return Ok(StepOutcome::Continue { cycles: 3 });
+                }
+
+                Err(CpuError::InvalidInstruction {
+                    opcode: instr as u64,
+                    pc,
+                })
             }
         }
     }

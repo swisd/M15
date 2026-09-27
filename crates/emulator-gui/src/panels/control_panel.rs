@@ -14,16 +14,22 @@ pub fn render_control_panel(
     speed_hz: &mut u32,
     show_terminal: &mut bool,
     show_serial_console: &mut bool,
+    show_breadboard_view: &mut bool,
     on_step_1: &mut bool,
     on_step_10: &mut bool,
     on_reset: &mut bool,
     on_load_demo: &mut bool,
     on_open_load_dialog: &mut bool,
+    on_open_file_browser: &mut bool,
 ) {
     ui.horizontal_wrapped(|ui| {
         // Load Project / File button
         if ui.button(RichText::new("📂 Load Project / File").color(Color32::from_rgb(255, 215, 0)).strong()).clicked() {
             *on_open_load_dialog = true;
+        }
+
+        if ui.button(RichText::new("📁 Browse...").color(Color32::from_rgb(100, 220, 255)).strong()).clicked() {
+            *on_open_file_browser = true;
         }
 
         ui.separator();
@@ -108,6 +114,15 @@ pub fn render_control_panel(
         };
         if ui.button(serial_btn_text).clicked() {
             *show_serial_console = !*show_serial_console;
+        }
+
+        let breadboard_btn_text = if *show_breadboard_view {
+            RichText::new("🍞 Breadboard").color(Color32::from_rgb(120, 230, 140)) // I couldn't find an icon for breadboard
+        } else {
+            RichText::new("🍞 Breadboard").weak()
+        };
+        if ui.button(breadboard_btn_text).clicked() {
+            *show_breadboard_view = !*show_breadboard_view;
         }
 
         ui.separator();

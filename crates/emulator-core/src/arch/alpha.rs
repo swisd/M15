@@ -109,8 +109,119 @@ impl CpuEngine for AlphaCpu {
                 Ok(StepOutcome::Interrupt(0))
             }
             _ => {
-                self.state.r[31] = 0;
-                Ok(StepOutcome::Continue { cycles: 1 })
+                let op = (instr >> 26) & 0x3F;
+                let ra = ((instr >> 21) & 0x1F) as usize;
+                let rb = ((instr >> 16) & 0x1F) as usize;
+                let is_lit = (instr & 0x1000) != 0;
+                let lit = ((instr >> 13) & 0xFF) as u64;
+                let rc = (instr & 0x1F) as usize;
+                let func = (instr >> 5) & 0x7F;
+                let b_val = if is_lit { lit } else { self.state.r[rb] };
+                let a_val = self.state.r[ra];
+
+                match op {
+                    0x10 => {
+                        // Integer Arithmetic
+                        match func {
+                            0x00 | 0x20 => {
+                                // ADDL / ADDQ
+                                if rc != 31 {
+                                    self.state.r[rc] = a_val.wrapping_add(b_val);
+                                }
+                            }
+                            0x09 | 0x29 => {
+                                // SUBL / SUBQ
+                                if rc != 31 {
+                                    self.state.r[rc] = a_val.wrapping_sub(b_val);
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.state.r[31] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x11 => {
+                        // Integer Logical
+                        match func {
+                            0x00 => {
+                                // AND
+                                if rc != 31 {
+                                    self.state.r[rc] = a_val & b_val;
+                                }
+                            }
+                            0x20 => {
+                                // BIS (OR / MOV)
+                                if rc != 31 {
+                                    self.state.r[rc] = a_val | b_val;
+                                }
+                            }
+                            0x40 => {
+                                // XOR
+                                if rc != 31 {
+                                    self.state.r[rc] = a_val ^ b_val;
+                                }
+                            }
+                            0x08 => {
+                                // BIC
+                                if rc != 31 {
+                                    self.state.r[rc] = a_val & !b_val;
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.state.r[31] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    0x28 | 0x29 => {
+                        // LDL / LDQ
+                        let disp16 = (instr as i16) as i64 as u64;
+                        let addr = self.state.r[rb].wrapping_add(disp16);
+                        let val = bus.read_u64(addr, Endianness::LittleEndian)?;
+                        if ra != 31 {
+                            self.state.r[ra] = val;
+                        }
+                        self.state.r[31] = 0;
+                        Ok(StepOutcome::Continue { cycles: 3 })
+                    }
+                    0x2C | 0x2D => {
+                        // STL / STQ
+                        let disp16 = (instr as i16) as i64 as u64;
+                        let addr = self.state.r[rb].wrapping_add(disp16);
+                        let val = self.state.r[ra];
+                        bus.write_u64(addr, val, Endianness::LittleEndian)?;
+                        self.state.r[31] = 0;
+                        Ok(StepOutcome::Continue { cycles: 3 })
+                    }
+                    0x30 | 0x34 => {
+                        // BR / BSR
+                        if ra != 31 {
+                            self.state.r[ra] = self.state.pc;
+                        }
+                        let disp21 = instr & 0x1FFFFF;
+                        let sign_ext = if disp21 & 0x100000 != 0 {
+                            disp21 | 0xFFE00000
+                        } else {
+                            disp21
+                        };
+                        let offset = ((sign_ext as i32) as i64) << 2;
+                        self.state.pc = ((self.state.pc as i64).wrapping_add(offset)) as u64;
+                        self.state.r[31] = 0;
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    0x1A => {
+                        // JMP / RET (0x68000000 / 0x6BFA8001)
+                        if ra != 31 {
+                            self.state.r[ra] = self.state.pc;
+                        }
+                        self.state.pc = self.state.r[rb];
+                        self.state.r[31] = 0;
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    _ => {
+                        self.state.r[31] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                }
             }
         }
     }

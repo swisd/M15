@@ -59,6 +59,92 @@ impl X86_64Cpu {
         self.state.rsp = self.state.rsp.wrapping_add(8);
         Ok(val)
     }
+
+    pub fn get_reg64(&self, reg: u8) -> u64 {
+        match reg & 0x0F {
+            0 => self.state.rax,
+            1 => self.state.rcx,
+            2 => self.state.rdx,
+            3 => self.state.rbx,
+            4 => self.state.rsp,
+            5 => self.state.rbp,
+            6 => self.state.rsi,
+            7 => self.state.rdi,
+            8 => self.state.r8,
+            9 => self.state.r9,
+            10 => self.state.r10,
+            11 => self.state.r11,
+            12 => self.state.r12,
+            13 => self.state.r13,
+            14 => self.state.r14,
+            15 => self.state.r15,
+            _ => 0,
+        }
+    }
+
+    pub fn set_reg64(&mut self, reg: u8, val: u64) {
+        match reg & 0x0F {
+            0 => self.state.rax = val,
+            1 => self.state.rcx = val,
+            2 => self.state.rdx = val,
+            3 => self.state.rbx = val,
+            4 => self.state.rsp = val,
+            5 => self.state.rbp = val,
+            6 => self.state.rsi = val,
+            7 => self.state.rdi = val,
+            8 => self.state.r8 = val,
+            9 => self.state.r9 = val,
+            10 => self.state.r10 = val,
+            11 => self.state.r11 = val,
+            12 => self.state.r12 = val,
+            13 => self.state.r13 = val,
+            14 => self.state.r14 = val,
+            15 => self.state.r15 = val,
+            _ => {}
+        }
+    }
+
+    fn update_flags_logic(&mut self, val: u64) {
+        self.state.rflags &= !(0x40 | 0x80 | 0x01 | 0x800);
+        if val == 0 {
+            self.state.rflags |= 0x40; // ZF
+        }
+        if (val as i64) < 0 {
+            self.state.rflags |= 0x80; // SF
+        }
+    }
+
+    fn update_flags_add(&mut self, a: u64, b: u64, res: u64) {
+        self.state.rflags &= !(0x40 | 0x80 | 0x01 | 0x800);
+        if res == 0 {
+            self.state.rflags |= 0x40; // ZF
+        }
+        if (res as i64) < 0 {
+            self.state.rflags |= 0x80; // SF
+        }
+        if (res as u128) < (a as u128) {
+            self.state.rflags |= 0x01; // CF
+        }
+        if ((a ^ res) & (b ^ res) & 0x8000_0000_0000_0000) != 0 {
+            self.state.rflags |= 0x800; // OF
+        }
+    }
+
+    fn update_flags_sub(&mut self, a: u64, b: u64, res: u64) {
+        self.state.rflags &= !(0x40 | 0x80 | 0x01 | 0x800);
+        if res == 0 {
+            self.state.rflags |= 0x40; // ZF
+        }
+        if (res as i64) < 0 {
+            self.state.rflags |= 0x80; // SF
+        }
+        if a < b {
+            self.state.rflags |= 0x01; // CF
+        }
+        if ((a ^ b) & (a ^ res) & 0x8000_0000_0000_0000) != 0 {
+            self.state.rflags |= 0x800; // OF
+        }
+    }
 }
 
 impl CpuEngine for X86_64Cpu {
@@ -115,8 +201,18 @@ impl CpuEngine for X86_64Cpu {
         }
 
         let pc = self.pc();
-        let opcode = bus.read_u8(pc)?;
+        let mut opcode = bus.read_u8(pc)?;
         self.state.rip = self.state.rip.wrapping_add(1);
+
+        let mut rex = 0u8;
+        if (opcode & 0xF0) == 0x40 {
+            rex = opcode;
+            opcode = bus.read_u8(self.pc())?;
+            self.state.rip = self.state.rip.wrapping_add(1);
+        }
+
+        let rex_b = if (rex & 1) != 0 { 8 } else { 0 };
+        let rex_r = if (rex & 4) != 0 { 8 } else { 0 };
 
         match opcode {
             0x90 => {
@@ -128,27 +224,229 @@ impl CpuEngine for X86_64Cpu {
                 self.state.halted = true;
                 Ok(StepOutcome::Halted)
             }
-            0x50 => {
-                // PUSH RAX
-                let rax = self.state.rax;
-                self.push_u64(bus, rax)?;
+            0xCC => {
+                // INT 3
+                Ok(StepOutcome::Breakpoint)
+            }
+            0xCD => {
+                // INT imm8
+                let vector = bus.read_u8(self.pc())? as u32;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                Ok(StepOutcome::Interrupt(vector))
+            }
+            0x50..=0x57 => {
+                // PUSH r64
+                let reg = (opcode - 0x50) | rex_b;
+                let val = self.get_reg64(reg);
+                self.push_u64(bus, val)?;
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
-            0x58 => {
-                // POP RAX
-                self.state.rax = self.pop_u64(bus)?;
+            0x58..=0x5F => {
+                // POP r64
+                let reg = (opcode - 0x58) | rex_b;
+                let val = self.pop_u64(bus)?;
+                self.set_reg64(reg, val);
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x68 => {
+                // PUSH imm32 (sign-extended to 64)
+                let imm = bus.read_u32(self.pc(), Endianness::LittleEndian)? as i32 as i64 as u64;
+                self.state.rip = self.state.rip.wrapping_add(4);
+                self.push_u64(bus, imm)?;
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x6A => {
+                // PUSH imm8 (sign-extended to 64)
+                let imm = bus.read_u8(self.pc())? as i8 as i64 as u64;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                self.push_u64(bus, imm)?;
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0xB8..=0xBF => {
+                // MOV r64, imm64
+                let reg = (opcode - 0xB8) | rex_b;
+                let val = bus.read_u64(self.pc(), Endianness::LittleEndian)?;
+                self.state.rip = self.state.rip.wrapping_add(8);
+                self.set_reg64(reg, val);
+                Ok(StepOutcome::Continue { cycles: 1 })
+            }
+            0x89 => {
+                // MOV r/m64, r64
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                let reg = ((modrm >> 3) & 7) | rex_r;
+                let rm = (modrm & 7) | rex_b;
+                let val = self.get_reg64(reg);
+                if (modrm >> 6) == 3 {
+                    self.set_reg64(rm, val);
+                } else {
+                    let addr = self.get_reg64(rm);
+                    bus.write_u64(addr, val, Endianness::LittleEndian)?;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x8B => {
+                // MOV r64, r/m64
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                let reg = ((modrm >> 3) & 7) | rex_r;
+                let rm = (modrm & 7) | rex_b;
+                let val = if (modrm >> 6) == 3 {
+                    self.get_reg64(rm)
+                } else {
+                    let addr = self.get_reg64(rm);
+                    bus.read_u64(addr, Endianness::LittleEndian)?
+                };
+                self.set_reg64(reg, val);
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x01 => {
+                // ADD r/m64, r64
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                let reg = ((modrm >> 3) & 7) | rex_r;
+                let rm = (modrm & 7) | rex_b;
+                let r_val = self.get_reg64(reg);
+                let rm_val = self.get_reg64(rm);
+                let res = rm_val.wrapping_add(r_val);
+                self.update_flags_add(rm_val, r_val, res);
+                if (modrm >> 6) == 3 {
+                    self.set_reg64(rm, res);
+                } else {
+                    let addr = self.get_reg64(rm);
+                    bus.write_u64(addr, res, Endianness::LittleEndian)?;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x03 => {
+                // ADD r64, r/m64
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                let reg = ((modrm >> 3) & 7) | rex_r;
+                let rm = (modrm & 7) | rex_b;
+                let rm_val = if (modrm >> 6) == 3 {
+                    self.get_reg64(rm)
+                } else {
+                    let addr = self.get_reg64(rm);
+                    bus.read_u64(addr, Endianness::LittleEndian)?
+                };
+                let r_val = self.get_reg64(reg);
+                let res = r_val.wrapping_add(rm_val);
+                self.update_flags_add(r_val, rm_val, res);
+                self.set_reg64(reg, res);
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x29 => {
+                // SUB r/m64, r64
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                let reg = ((modrm >> 3) & 7) | rex_r;
+                let rm = (modrm & 7) | rex_b;
+                let r_val = self.get_reg64(reg);
+                let rm_val = self.get_reg64(rm);
+                let res = rm_val.wrapping_sub(r_val);
+                self.update_flags_sub(rm_val, r_val, res);
+                if (modrm >> 6) == 3 {
+                    self.set_reg64(rm, res);
+                } else {
+                    let addr = self.get_reg64(rm);
+                    bus.write_u64(addr, res, Endianness::LittleEndian)?;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x2B => {
+                // SUB r64, r/m64
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                let reg = ((modrm >> 3) & 7) | rex_r;
+                let rm = (modrm & 7) | rex_b;
+                let rm_val = if (modrm >> 6) == 3 {
+                    self.get_reg64(rm)
+                } else {
+                    let addr = self.get_reg64(rm);
+                    bus.read_u64(addr, Endianness::LittleEndian)?
+                };
+                let r_val = self.get_reg64(reg);
+                let res = r_val.wrapping_sub(rm_val);
+                self.update_flags_sub(r_val, rm_val, res);
+                self.set_reg64(reg, res);
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x31 => {
+                // XOR r/m64, r64
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                let reg = ((modrm >> 3) & 7) | rex_r;
+                let rm = (modrm & 7) | rex_b;
+                let r_val = self.get_reg64(reg);
+                let rm_val = self.get_reg64(rm);
+                let res = rm_val ^ r_val;
+                self.update_flags_logic(res);
+                if (modrm >> 6) == 3 {
+                    self.set_reg64(rm, res);
+                } else {
+                    let addr = self.get_reg64(rm);
+                    bus.write_u64(addr, res, Endianness::LittleEndian)?;
+                }
+                Ok(StepOutcome::Continue { cycles: 1 })
+            }
+            0x39 => {
+                // CMP r/m64, r64
+                let modrm = bus.read_u8(self.pc())?;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                let reg = ((modrm >> 3) & 7) | rex_r;
+                let rm = (modrm & 7) | rex_b;
+                let r_val = self.get_reg64(reg);
+                let rm_val = self.get_reg64(rm);
+                let res = rm_val.wrapping_sub(r_val);
+                self.update_flags_sub(rm_val, r_val, res);
+                Ok(StepOutcome::Continue { cycles: 1 })
+            }
+            0xC3 => {
+                // RET
+                self.state.rip = self.pop_u64(bus)?;
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0xE8 => {
+                // CALL rel32
+                let rel = bus.read_u32(self.pc(), Endianness::LittleEndian)? as i32 as i64;
+                self.state.rip = self.state.rip.wrapping_add(4);
+                let ret_addr = self.state.rip;
+                self.push_u64(bus, ret_addr)?;
+                self.state.rip = (self.state.rip as i64).wrapping_add(rel) as u64;
+                Ok(StepOutcome::Continue { cycles: 4 })
+            }
+            0xE9 => {
+                // JMP rel32
+                let rel = bus.read_u32(self.pc(), Endianness::LittleEndian)? as i32 as i64;
+                self.state.rip = self.state.rip.wrapping_add(4);
+                self.state.rip = (self.state.rip as i64).wrapping_add(rel) as u64;
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
             0xEB => {
                 // JMP rel8
-                let rel = bus.read_u8(self.pc())? as i8;
+                let rel = bus.read_u8(self.pc())? as i8 as i64;
                 self.state.rip = self.state.rip.wrapping_add(1);
-                self.state.rip = (self.state.rip as i64).wrapping_add(rel as i64) as u64;
+                self.state.rip = (self.state.rip as i64).wrapping_add(rel) as u64;
                 Ok(StepOutcome::Continue { cycles: 2 })
             }
-            0xCC => {
-                // INT 3
-                Ok(StepOutcome::Breakpoint)
+            0x74 => {
+                // JZ / JE rel8
+                let rel = bus.read_u8(self.pc())? as i8 as i64;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                if (self.state.rflags & 0x40) != 0 {
+                    self.state.rip = (self.state.rip as i64).wrapping_add(rel) as u64;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
+            }
+            0x75 => {
+                // JNZ / JNE rel8
+                let rel = bus.read_u8(self.pc())? as i8 as i64;
+                self.state.rip = self.state.rip.wrapping_add(1);
+                if (self.state.rflags & 0x40) == 0 {
+                    self.state.rip = (self.state.rip as i64).wrapping_add(rel) as u64;
+                }
+                Ok(StepOutcome::Continue { cycles: 2 })
             }
             _ => Err(CpuError::InvalidInstruction {
                 opcode: opcode as u64,

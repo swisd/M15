@@ -117,18 +117,73 @@ impl CpuEngine for M68kCpu {
                 Ok(StepOutcome::Interrupt(vector))
             }
             _ => {
-                // Generic instruction handling
+                // MOVEQ #imm8, Dn (0x7000 | (dn << 9) | imm8)
+                if (instr & 0xF100) == 0x7000 {
+                    let dn = ((instr >> 9) & 7) as usize;
+                    let imm8 = (instr & 0xFF) as i8 as i32 as u32;
+                    self.state.d[dn] = imm8;
+                    return Ok(StepOutcome::Continue { cycles: 4 });
+                }
+
+                // MOVE.L Dn, -(SP) (0x2F00 | dn)
+                if (instr & 0xFFF8) == 0x2F00 {
+                    let dn = (instr & 7) as usize;
+                    let val = self.state.d[dn];
+                    self.push_u32(bus, val)?;
+                    return Ok(StepOutcome::Continue { cycles: 8 });
+                }
+
+                // MOVE.L (SP)+, Dn (0x201F | (dn << 9))
+                if (instr & 0xF1FF) == 0x201F {
+                    let dn = ((instr >> 9) & 7) as usize;
+                    self.state.d[dn] = self.pop_u32(bus)?;
+                    return Ok(StepOutcome::Continue { cycles: 8 });
+                }
+
+                // MOVE.L Dm, Dn (0x2000 | (dn << 9) | dm)
+                if (instr & 0xF1F8) == 0x2000 {
+                    let dn = ((instr >> 9) & 7) as usize;
+                    let dm = (instr & 7) as usize;
+                    self.state.d[dn] = self.state.d[dm];
+                    return Ok(StepOutcome::Continue { cycles: 4 });
+                }
+
+                // ADD.L Dm, Dn (0xD080 | (dn << 9) | dm)
+                if (instr & 0xF1F8) == 0xD080 {
+                    let dn = ((instr >> 9) & 7) as usize;
+                    let dm = (instr & 7) as usize;
+                    self.state.d[dn] = self.state.d[dn].wrapping_add(self.state.d[dm]);
+                    return Ok(StepOutcome::Continue { cycles: 8 });
+                }
+
+                // SUB.L Dm, Dn (0x9080 | (dn << 9) | dm)
+                if (instr & 0xF1F8) == 0x9080 {
+                    let dn = ((instr >> 9) & 7) as usize;
+                    let dm = (instr & 7) as usize;
+                    self.state.d[dn] = self.state.d[dn].wrapping_sub(self.state.d[dm]);
+                    return Ok(StepOutcome::Continue { cycles: 8 });
+                }
+
+                // BRA.S rel8
                 if (instr & 0xFF00) == 0x6000 {
-                    // BRA.S rel8
                     let disp = (instr & 0x00FF) as i8;
                     self.state.pc = (self.state.pc as i32).wrapping_add(disp as i32) as u32;
-                    Ok(StepOutcome::Continue { cycles: 10 })
-                } else {
-                    Err(CpuError::InvalidInstruction {
-                        opcode: instr as u64,
-                        pc,
-                    })
+                    return Ok(StepOutcome::Continue { cycles: 10 });
                 }
+
+                // BSR.S rel8
+                if (instr & 0xFF00) == 0x6100 {
+                    let disp = (instr & 0x00FF) as i8;
+                    let return_addr = self.state.pc;
+                    self.push_u32(bus, return_addr)?;
+                    self.state.pc = (self.state.pc as i32).wrapping_add(disp as i32) as u32;
+                    return Ok(StepOutcome::Continue { cycles: 18 });
+                }
+
+                Err(CpuError::InvalidInstruction {
+                    opcode: instr as u64,
+                    pc,
+                })
             }
         }
     }

@@ -33,6 +33,9 @@ fn test_stack_analysis_x86_64() {
         show_relative_offset: true,
         custom_base_addr: None,
         word_size_override: None,
+        slots_above_sp: 0,
+        lock_to_sp: true,
+        scroll_offset_slots: 0,
     };
 
     let analysis = analyze_stack(&cpu, &bus, &options);
@@ -105,4 +108,49 @@ fn test_stack_analysis_all_architectures() {
         let formatted = format_stack_table(&analysis, &options);
         assert!(!formatted.is_empty());
     }
+}
+
+#[test]
+fn test_stack_traversal_and_slots_above_sp() {
+    let mut cpu = X86_64Cpu::new();
+    let mut bus = ArrayMemory::<65536>::new();
+
+    cpu.set_sp(0x8000);
+    // Write value at SP-8 (above SP on downward stack)
+    bus.write_u64(0x7FF8, 0xAAAAAAAAAAAAAAAA, emulator_core::types::Endianness::LittleEndian)
+        .unwrap();
+    // Write value at SP
+    bus.write_u64(0x8000, 0xBBBBBBBBBBBBBBBB, emulator_core::types::Endianness::LittleEndian)
+        .unwrap();
+    // Write value at SP+8
+    bus.write_u64(0x8008, 0xCCCCCCCCCCCCCCCC, emulator_core::types::Endianness::LittleEndian)
+        .unwrap();
+
+    let mut options = StackViewOptions {
+        slot_count: 4,
+        slots_above_sp: 1,
+        lock_to_sp: true,
+        scroll_offset_slots: 0,
+        ..Default::default()
+    };
+
+    let analysis = analyze_stack(&cpu, &bus, &options);
+    assert_eq!(analysis.entries.len(), 4);
+    // Entry 0 is SP - 8 (above SP)
+    assert_eq!(analysis.entries[0].address, 0x7FF8);
+    assert_eq!(analysis.entries[0].value, 0xAAAAAAAAAAAAAAAA);
+    assert_eq!(analysis.entries[0].offset_from_sp, -8);
+    assert!(!analysis.entries[0].is_sp);
+
+    // Entry 1 is SP
+    assert_eq!(analysis.entries[1].address, 0x8000);
+    assert_eq!(analysis.entries[1].value, 0xBBBBBBBBBBBBBBBB);
+    assert_eq!(analysis.entries[1].offset_from_sp, 0);
+    assert!(analysis.entries[1].is_sp);
+
+    // Test unlocked traversal offset
+    options.lock_to_sp = false;
+    options.scroll_offset_slots = 2; // Shift by +2 slots (+16 bytes)
+    let analysis_traversed = analyze_stack(&cpu, &bus, &options);
+    assert_eq!(analysis_traversed.entries[0].address, 0x7FF8 + 16);
 }

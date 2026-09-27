@@ -38,7 +38,7 @@ pub mod x86_64;
 pub mod mos6502;
 
 /// Target CPU Architecture identifiers supported by the emulator.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum Architecture {
     I8086,
     X86,

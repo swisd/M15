@@ -116,7 +116,53 @@ impl CpuEngine for SuperHCpu {
                 Ok(StepOutcome::Breakpoint)
             }
             _ => {
-                // BRA or generic instruction
+                // TRAPA #imm (0xC3xx)
+                if (instr & 0xFF00) == 0xC300 {
+                    let imm = (instr & 0xFF) as u32;
+                    return Ok(StepOutcome::Interrupt(imm));
+                }
+
+                // MOV #imm8, Rn (0xEnyy)
+                if (instr & 0xF000) == 0xE000 {
+                    let rn = ((instr >> 8) & 0x0F) as usize;
+                    let imm8 = (instr & 0xFF) as i8 as i32 as u32;
+                    self.state.r[rn] = imm8;
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // MOV Rm, Rn (0x6nm3)
+                if (instr & 0xF00F) == 0x6003 {
+                    let rn = ((instr >> 8) & 0x0F) as usize;
+                    let rm = ((instr >> 4) & 0x0F) as usize;
+                    self.state.r[rn] = self.state.r[rm];
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // ADD #imm8, Rn (0x7nyy)
+                if (instr & 0xF000) == 0x7000 {
+                    let rn = ((instr >> 8) & 0x0F) as usize;
+                    let imm8 = (instr & 0xFF) as i8 as i32 as u32;
+                    self.state.r[rn] = self.state.r[rn].wrapping_add(imm8);
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // ADD Rm, Rn (0x3nmC)
+                if (instr & 0xF00F) == 0x300C {
+                    let rn = ((instr >> 8) & 0x0F) as usize;
+                    let rm = ((instr >> 4) & 0x0F) as usize;
+                    self.state.r[rn] = self.state.r[rn].wrapping_add(self.state.r[rm]);
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // SUB Rm, Rn (0x3nm8)
+                if (instr & 0xF00F) == 0x3008 {
+                    let rn = ((instr >> 8) & 0x0F) as usize;
+                    let rm = ((instr >> 4) & 0x0F) as usize;
+                    self.state.r[rn] = self.state.r[rn].wrapping_sub(self.state.r[rm]);
+                    return Ok(StepOutcome::Continue { cycles: 1 });
+                }
+
+                // BRA disp12 (0xAxxx)
                 if (instr & 0xF000) == 0xA000 {
                     let d12 = instr & 0x0FFF;
                     let sign_ext = if d12 & 0x0800 != 0 {
@@ -126,13 +172,27 @@ impl CpuEngine for SuperHCpu {
                     };
                     let offset = ((sign_ext as i16) as i32) * 2 + 2;
                     self.state.pc = ((self.state.pc as i32).wrapping_add(offset)) as u32;
-                    Ok(StepOutcome::Continue { cycles: 2 })
-                } else {
-                    Err(CpuError::InvalidInstruction {
-                        opcode: instr as u64,
-                        pc,
-                    })
+                    return Ok(StepOutcome::Continue { cycles: 2 });
                 }
+
+                // BSR disp12 (0xBxxx)
+                if (instr & 0xF000) == 0xB000 {
+                    let d12 = instr & 0x0FFF;
+                    let sign_ext = if d12 & 0x0800 != 0 {
+                        d12 | 0xF000
+                    } else {
+                        d12
+                    };
+                    self.state.pr = self.state.pc.wrapping_add(2);
+                    let offset = ((sign_ext as i16) as i32) * 2 + 2;
+                    self.state.pc = ((self.state.pc as i32).wrapping_add(offset)) as u32;
+                    return Ok(StepOutcome::Continue { cycles: 2 });
+                }
+
+                Err(CpuError::InvalidInstruction {
+                    opcode: instr as u64,
+                    pc,
+                })
             }
         }
     }

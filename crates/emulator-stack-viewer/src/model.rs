@@ -160,6 +160,12 @@ pub struct StackViewOptions {
     pub custom_base_addr: Option<u64>,
     /// Optional word size override (e.g., viewing 16-bit slots as 32-bit).
     pub word_size_override: Option<WordSize>,
+    /// Number of slots above the stack pointer to inspect and display (default: 4).
+    pub slots_above_sp: usize,
+    /// Whether the view is locked to follow the stack pointer (default: true).
+    pub lock_to_sp: bool,
+    /// Manual scroll/traversal offset in slots from the base anchor.
+    pub scroll_offset_slots: i64,
 }
 
 impl Default for StackViewOptions {
@@ -172,6 +178,9 @@ impl Default for StackViewOptions {
             show_relative_offset: true,
             custom_base_addr: None,
             word_size_override: None,
+            slots_above_sp: 0,
+            lock_to_sp: true,
+            scroll_offset_slots: 0,
         }
     }
 }

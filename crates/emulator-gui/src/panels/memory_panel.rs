@@ -44,6 +44,7 @@ pub fn render_memory_panel(
     let bytes_per_row = 16;
 
     ScrollArea::vertical()
+        .id_salt("memory_panel_scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             egui::Grid::new("memory_hex_grid")

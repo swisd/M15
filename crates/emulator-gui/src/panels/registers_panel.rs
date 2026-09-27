@@ -10,6 +10,7 @@ pub fn render_registers_panel(
     ui.separator();
 
     ScrollArea::vertical()
+        .id_salt("registers_panel_scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             egui::Grid::new("registers_grid")

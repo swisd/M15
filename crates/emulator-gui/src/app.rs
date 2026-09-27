@@ -9,13 +9,18 @@ use emulator_core::cpu::{CpuEngine, StepOutcome};
 use emulator_stack_viewer::{analyze_stack, StackViewOptions, StackViewerWidget};
 
 use crate::demos::load_demo_for_arch;
-use crate::panels::code_panel::render_code_panel;
+use crate::interrupts::{
+    dispatch_interrupt, render_vga_buffer_dialog, InterruptMode, VgaBufferConfig, VgaBufferPreset,
+};
+use crate::panels::code_panel::{render_code_panel, CodePanelState};
 use crate::panels::control_panel::render_control_panel;
+use crate::panels::file_browser::{render_file_browser, FileBrowserModal};
 use crate::panels::memory_panel::render_memory_panel;
 use crate::panels::project_dialog::{render_arch_picker_modal, render_load_dialog};
 use crate::panels::registers_panel::render_registers_panel;
 use crate::serial::SerialConsole;
 use crate::terminal::TerminalScreen;
+use emulator_core::project::AsmProgram;
 
 /// Current execution lifecycle state of the CPU.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +66,9 @@ pub struct EmulatorApp {
     pub show_terminal: bool,
     pub serial_console: SerialConsole,
     pub show_serial_console: bool,
+    pub breadboard: Option<String>,
+    pub show_breadboard_view: bool,
+    pub breadboard_unavailable: bool,
 
     // App status & dialogs
     pub status_message: Option<String>,
@@ -78,6 +86,18 @@ pub struct EmulatorApp {
     pub loaded_source_code: Option<String>,
     pub current_project_name: Option<String>,
     pub current_project_path: Option<String>,
+    pub loaded_program: Option<AsmProgram>,
+
+    // Code panel state
+    pub code_panel_state: CodePanelState,
+
+    // File / Folder Browser
+    pub file_browser: FileBrowserModal,
+
+    // Interrupt & VGA buffer configuration
+    pub interrupt_mode: InterruptMode,
+    pub vga_buffer_config: VgaBufferConfig,
+    pub show_vga_buffer_dialog: bool,
 }
 
 impl Default for EmulatorApp {
@@ -100,6 +120,11 @@ impl EmulatorApp {
 
         let mut serial_console = SerialConsole::new();
         serial_console.sync_with_bus(&mut bus);
+
+        let interrupt_mode = match arch {
+            Architecture::I8086 => InterruptMode::MsDos,
+            _ => InterruptMode::ArchDefault,
+        };
 
         Self {
             cpu,
@@ -125,6 +150,9 @@ impl EmulatorApp {
             show_terminal: false,
             serial_console,
             show_serial_console: false,
+            breadboard: None,
+            show_breadboard_view: false,
+            breadboard_unavailable: false,
             status_message: Some(format!("Loaded {} demo.", arch.name())),
             show_about: false,
             show_load_dialog: false,
@@ -147,12 +175,41 @@ hlt
             loaded_source_code: None,
             current_project_name: None,
             current_project_path: None,
+            loaded_program: None,
+            code_panel_state: CodePanelState::default(),
+            file_browser: FileBrowserModal::new(),
+            interrupt_mode,
+            vga_buffer_config: VgaBufferConfig::bios_default(),
+            show_vga_buffer_dialog: false,
         }
+    }
+
+    /// Sets the active interrupt emulation mode.
+    pub fn set_interrupt_mode(&mut self, mode: InterruptMode) {
+        self.interrupt_mode = mode;
+        self.status_message = Some(format!(
+            "Interrupt mode set to {} ({}).",
+            mode.name(),
+            mode.description()
+        ));
+    }
+
+    /// Sets the VGA buffer preset and synchronizes memory address.
+    pub fn set_vga_buffer_preset(&mut self, preset: VgaBufferPreset) {
+        self.vga_buffer_config.apply_preset(preset);
+        self.terminal.vram_base_addr = self.vga_buffer_config.base_addr;
+        self.terminal.sync_to_vram(&mut self.bus);
+        self.status_message = Some(format!(
+            "VGA Buffer configured: {} (Base: {:#010X}).",
+            preset.name(),
+            self.vga_buffer_config.base_addr
+        ));
     }
 
     /// Switches the active CPU architecture and resets system state.
     pub fn switch_arch(&mut self, arch: Architecture) {
         self.selected_arch = arch;
+        self.loaded_program = None;
         self.cpu = AnyCpu::new(arch);
         load_demo_for_arch(arch, &mut self.cpu, &mut self.bus);
         self.terminal.sync_to_vram(&mut self.bus);
@@ -165,15 +222,37 @@ hlt
         self.status_message = Some(format!("Switched to {} architecture.", arch.name()));
     }
 
-    /// Resets the CPU state and reloads demo memory.
+    /// Resets the CPU state and resets previously assembled program or reloads demo memory.
     pub fn reset_cpu(&mut self) {
-        load_demo_for_arch(self.selected_arch, &mut self.cpu, &mut self.bus);
-        self.terminal.sync_to_vram(&mut self.bus);
-        self.serial_console.sync_with_bus(&mut self.bus);
-        self.execution_state = ExecutionState::Stopped;
-        self.cycle_count = 0;
-        self.step_count = 0;
-        self.status_message = Some("System reset.".to_string());
+        if let Some(ref program) = self.loaded_program {
+            self.cpu.reset();
+            self.bus = DynamicMemory::new(1024 * 1024);
+            program.load_into(&mut self.cpu, &mut self.bus);
+            self.terminal.sync_to_vram(&mut self.bus);
+            self.serial_console.sync_with_bus(&mut self.bus);
+            self.execution_state = ExecutionState::Stopped;
+            self.cycle_count = 0;
+            self.step_count = 0;
+            self.memory_view_addr = self.cpu.sp() & !0x0F;
+            self.memory_addr_input = format!("{:#X}", self.memory_view_addr);
+            let name = self.current_project_name.as_deref().unwrap_or("Program");
+            self.status_message = Some(format!(
+                "Reset to assembled program '{}' (PC: {:#06X}, SP: {:#06X}).",
+                name,
+                self.cpu.pc(),
+                self.cpu.sp()
+            ));
+        } else {
+            load_demo_for_arch(self.selected_arch, &mut self.cpu, &mut self.bus);
+            self.terminal.sync_to_vram(&mut self.bus);
+            self.serial_console.sync_with_bus(&mut self.bus);
+            self.execution_state = ExecutionState::Stopped;
+            self.cycle_count = 0;
+            self.step_count = 0;
+            self.memory_view_addr = self.cpu.sp() & !0x0F;
+            self.memory_addr_input = format!("{:#X}", self.memory_view_addr);
+            self.status_message = Some("System reset to default demo.".to_string());
+        }
     }
 
     /// Executes a single CPU instruction step.
@@ -198,7 +277,20 @@ hlt
                         self.status_message = Some("Breakpoint reached.".to_string());
                     }
                     StepOutcome::Interrupt(vec) => {
-                        self.status_message = Some(format!("Interrupt raised: vector {:#X}", vec));
+                        let (msg, state_change) = dispatch_interrupt(
+                            self.interrupt_mode,
+                            vec,
+                            &mut self.cpu,
+                            &mut self.bus,
+                            &mut self.terminal,
+                            &mut self.serial_console,
+                        );
+                        if let Some(msg) = msg {
+                            self.status_message = Some(msg);
+                        }
+                        if let Some(state) = state_change {
+                            self.execution_state = state;
+                        }
                     }
                 }
             }
@@ -237,6 +329,7 @@ hlt
                 self.loaded_source_code = Some(loaded.source_code);
                 self.current_project_name = Some(loaded.config.name.clone());
                 self.current_project_path = Some(dir_path.to_string());
+                self.loaded_program = Some(loaded.program.clone());
                 self.status_message = Some(format!(
                     "Loaded project '{}' for {} (Entry: {:#06X})",
                     loaded.config.name,
@@ -341,6 +434,7 @@ hlt
                 self.loaded_source_code = Some(source_code.to_string());
                 self.current_project_name = Some(name.to_string());
                 self.current_project_path = file_path;
+                self.loaded_program = Some(program.clone());
                 self.status_message = Some(format!(
                     "Loaded '{}' for {} (Entry: {:#06X}, SP: {:#06X})",
                     name,
@@ -406,12 +500,17 @@ impl App for EmulatorApp {
         let mut on_reset = false;
         let mut on_load_demo = false;
         let mut on_open_load_dialog = false;
+        let mut on_open_file_browser = false;
 
         // Execute running instructions if in Running state
         if self.execution_state == ExecutionState::Running {
             self.step();
             ctx.request_repaint();
         }
+        let mut visuals = egui::Visuals::dark();
+        visuals.window_fill = Color32::BLACK;
+        visuals.panel_fill = visuals.window_fill;
+        ctx.set_visuals(visuals);
 
         // Top Menu Bar
         egui::TopBottomPanel::top("top_menu_bar").show(ctx, |ui| {
@@ -421,8 +520,12 @@ impl App for EmulatorApp {
                         on_open_load_dialog = true;
                         ui.close_menu();
                     }
+                    if ui.button("📁 Browse File / Folder...").clicked() {
+                        on_open_file_browser = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
-                    if ui.button("Reset CPU").clicked() {
+                    if ui.button("🔄 Reset Program / CPU").clicked() {
                         on_reset = true;
                         ui.close_menu();
                     }
@@ -462,6 +565,113 @@ impl App for EmulatorApp {
                     }
                 });
 
+                ui.menu_button("Interrupt", |ui| {
+                    ui.label(RichText::new("Interrupt Emulation:").strong());
+
+                    if ui
+                        .selectable_label(
+                            self.interrupt_mode == InterruptMode::ArchDefault,
+                            InterruptMode::ArchDefault.display_label(),
+                        )
+                        .clicked()
+                    {
+                        self.set_interrupt_mode(InterruptMode::ArchDefault);
+                        ui.close_menu();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.interrupt_mode == InterruptMode::MsDos,
+                            InterruptMode::MsDos.display_label(),
+                        )
+                        .clicked()
+                    {
+                        self.set_interrupt_mode(InterruptMode::MsDos);
+                        ui.close_menu();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.interrupt_mode == InterruptMode::Bios,
+                            InterruptMode::Bios.display_label(),
+                        )
+                        .clicked()
+                    {
+                        self.set_interrupt_mode(InterruptMode::Bios);
+                        ui.close_menu();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.interrupt_mode == InterruptMode::Uefi,
+                            InterruptMode::Uefi.display_label(),
+                        )
+                        .clicked()
+                    {
+                        self.set_interrupt_mode(InterruptMode::Uefi);
+                        ui.close_menu();
+                    }
+
+                    ui.separator();
+
+                    ui.menu_button("📺 VGA Buffer", |ui| {
+                        ui.label(RichText::new("VGA Buffer Presets:").strong());
+
+                        if ui
+                            .selectable_label(
+                                self.vga_buffer_config.preset == VgaBufferPreset::BiosDefault,
+                                "BIOS Default (0x000B8000)",
+                            )
+                            .clicked()
+                        {
+                            self.set_vga_buffer_preset(VgaBufferPreset::BiosDefault);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.vga_buffer_config.preset == VgaBufferPreset::UefiDefault,
+                                "UEFI Default (0x00A00000)",
+                            )
+                            .clicked()
+                        {
+                            self.set_vga_buffer_preset(VgaBufferPreset::UefiDefault);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.vga_buffer_config.preset == VgaBufferPreset::Custom,
+                                "Custom Address...",
+                            )
+                            .clicked()
+                        {
+                            self.show_vga_buffer_dialog = true;
+                            ui.close_menu();
+                        }
+
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!(
+                                "Current Base: {:#010X}",
+                                self.vga_buffer_config.base_addr
+                            ))
+                            .monospace()
+                            .weak(),
+                        );
+                        if ui
+                            .checkbox(
+                                &mut self.terminal.vram_sync_enabled,
+                                "Enable VRAM Sync",
+                            )
+                            .changed()
+                        {
+                            self.vga_buffer_config.sync_enabled = self.terminal.vram_sync_enabled;
+                        }
+
+                        ui.separator();
+                        if ui.button("⚙ Configure Custom VGA Buffer...").clicked() {
+                            self.show_vga_buffer_dialog = true;
+                            ui.close_menu();
+                        }
+                    });
+                });
+
                 ui.menu_button("Help", |ui| {
                     if ui.button("About M15 Multi-Arch Emulator").clicked() {
                         self.show_about = true;
@@ -482,11 +692,13 @@ impl App for EmulatorApp {
                 &mut self.speed_hz,
                 &mut self.show_terminal,
                 &mut self.show_serial_console,
+                &mut self.show_breadboard_view,
                 &mut on_step_1,
                 &mut on_step_10,
                 &mut on_reset,
                 &mut on_load_demo,
                 &mut on_open_load_dialog,
+                &mut on_open_file_browser,
             );
         });
 
@@ -540,7 +752,15 @@ impl App for EmulatorApp {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
                             ui.set_min_size(egui::vec2(left_width - 8.0, bot_h));
                             ui.set_max_size(egui::vec2(left_width - 8.0, bot_h));
-                            render_code_panel(ui, &self.cpu, &self.bus, &mut self.breakpoints);
+                            let symbols = self.loaded_program.as_ref().map(|p| &p.labels);
+                            render_code_panel(
+                                ui,
+                                &self.cpu,
+                                &self.bus,
+                                &mut self.breakpoints,
+                                &mut self.code_panel_state,
+                                symbols,
+                            );
                         });
                     },
                 );
@@ -608,14 +828,51 @@ impl App for EmulatorApp {
         if on_open_load_dialog {
             self.show_load_dialog = true;
         }
+        if on_open_file_browser {
+            self.file_browser.open();
+        }
+
+        // File Browser Modal
+        render_file_browser(ctx, self);
 
         // Project / File Loader Modals
         render_load_dialog(ctx, self);
         render_arch_picker_modal(ctx, self);
 
+        // VGA Buffer Configuration Modal Dialog
+        render_vga_buffer_dialog(
+            ctx,
+            &mut self.show_vga_buffer_dialog,
+            &mut self.vga_buffer_config,
+            &mut self.terminal,
+            &mut self.bus,
+        );
+
         // Independent Peripheral Windows (80x25 Terminal & Serial Console)
         self.terminal.render_window(ctx, &mut self.show_terminal, &mut self.bus);
         self.serial_console.render_window(ctx, &mut self.show_serial_console);
+        if self.show_breadboard_view {
+            if self.selected_arch == Architecture::Mos6502 {
+
+            } else {
+                self.breadboard_unavailable = true;
+                egui::Window::new("⚠ Error")
+                    .collapsible(false)
+                    .resizable(false)
+                    .open(&mut self.breadboard_unavailable.clone()) // Adds a close 'X' button to the top-right
+                    .show(ctx, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add(egui::Label::new("'Breadboard is only available \non these architectures: \n       MOS 6502'").wrap());
+                            ui.add_space(8.0);
+
+                            if ui.button("Dismiss").clicked() {
+                                self.breadboard_unavailable = false;
+                                self.show_breadboard_view = false;
+                            }
+                        });
+                    });
+            }
+        }
 
         // About Window Modal
         if self.show_about {
@@ -634,5 +891,8 @@ impl App for EmulatorApp {
                     }
                 });
         }
+
+
+
     }
 }

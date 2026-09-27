@@ -32,6 +32,28 @@ impl SparcCpu {
         cpu
     }
 
+    pub fn get_reg(&self, reg: usize) -> u32 {
+        match reg {
+            0 => 0,
+            1..=7 => self.state.g[reg],
+            8..=15 => self.state.o[reg - 8],
+            16..=23 => self.state.l[reg - 16],
+            24..=31 => self.state.i[reg - 24],
+            _ => 0,
+        }
+    }
+
+    pub fn set_reg(&mut self, reg: usize, val: u32) {
+        match reg {
+            0 => {}
+            1..=7 => self.state.g[reg] = val,
+            8..=15 => self.state.o[reg - 8] = val,
+            16..=23 => self.state.l[reg - 16] = val,
+            24..=31 => self.state.i[reg - 24] = val,
+            _ => {}
+        }
+    }
+
     pub fn push_u32(&mut self, bus: &mut dyn MemoryBus, val: u32) -> Result<(), CpuError> {
         self.state.o[6] = self.state.o[6].wrapping_sub(4);
         bus.write_u32(self.state.o[6] as u64, val, Endianness::BigEndian)?;
@@ -95,8 +117,8 @@ impl CpuEngine for SparcCpu {
             return Ok(StepOutcome::Halted);
         }
 
-        let pc = self.pc();
-        let instr = bus.read_u32(pc, Endianness::BigEndian)?;
+        let pc = self.pc() as u32;
+        let instr = bus.read_u32(pc as u64, Endianness::BigEndian)?;
         self.state.pc = self.state.npc;
         self.state.npc = self.state.npc.wrapping_add(4);
 
@@ -115,9 +137,135 @@ impl CpuEngine for SparcCpu {
                 Ok(StepOutcome::Halted)
             }
             _ => {
-                // General instruction or basic branch handling
-                self.state.g[0] = 0;
-                Ok(StepOutcome::Continue { cycles: 1 })
+                let op = (instr >> 30) & 3;
+
+                match op {
+                    0 => {
+                        // Format 2: SETHI / Branches
+                        let op2 = (instr >> 22) & 7;
+                        match op2 {
+                            4 => {
+                                // SETHI imm22, rd
+                                let rd = ((instr >> 25) & 0x1F) as usize;
+                                let imm22 = (instr & 0x003FFFFF) << 10;
+                                self.set_reg(rd, imm22);
+                                Ok(StepOutcome::Continue { cycles: 1 })
+                            }
+                            2 => {
+                                // Bicc
+                                let cond = (instr >> 25) & 0x0F;
+                                let disp22 = instr & 0x003FFFFF;
+                                let sign_ext = if disp22 & 0x00200000 != 0 {
+                                    disp22 | 0xFFC00000
+                                } else {
+                                    disp22
+                                };
+                                let offset = ((sign_ext as i32) << 2) as u32;
+                                if cond == 8 {
+                                    // BA (Branch Always)
+                                    self.state.npc = pc.wrapping_add(offset);
+                                }
+                                Ok(StepOutcome::Continue { cycles: 2 })
+                            }
+                            _ => Err(CpuError::InvalidInstruction { opcode: instr as u64, pc: pc as u64 }),
+                        }
+                    }
+                    1 => {
+                        // Format 1: CALL
+                        let disp30 = instr & 0x3FFFFFFF;
+                        self.set_reg(15, pc); // %o7 = PC
+                        self.state.npc = pc.wrapping_add(disp30 << 2);
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    2 => {
+                        // Format 3: ALU & JMPL
+                        let rd = ((instr >> 25) & 0x1F) as usize;
+                        let op3 = (instr >> 19) & 0x3F;
+                        let rs1 = ((instr >> 14) & 0x1F) as usize;
+                        let i_bit = (instr & 0x00002000) != 0;
+                        let op2 = if i_bit {
+                            let simm13 = instr & 0x1FFF;
+                            if simm13 & 0x1000 != 0 {
+                                (simm13 | 0xFFFFE000) as i32 as u32
+                            } else {
+                                simm13
+                            }
+                        } else {
+                            let rs2 = (instr & 0x1F) as usize;
+                            self.get_reg(rs2)
+                        };
+                        let rs1_val = self.get_reg(rs1);
+
+                        match op3 {
+                            0x00 => {
+                                // ADD
+                                self.set_reg(rd, rs1_val.wrapping_add(op2));
+                            }
+                            0x04 => {
+                                // SUB
+                                self.set_reg(rd, rs1_val.wrapping_sub(op2));
+                            }
+                            0x01 => {
+                                // AND
+                                self.set_reg(rd, rs1_val & op2);
+                            }
+                            0x02 => {
+                                // OR (mov = or %g0, rs, rd)
+                                self.set_reg(rd, rs1_val | op2);
+                            }
+                            0x03 => {
+                                // XOR
+                                self.set_reg(rd, rs1_val ^ op2);
+                            }
+                            0x38 => {
+                                // JMPL (retl = jmpl %o7 + 8, %g0)
+                                let target = rs1_val.wrapping_add(op2);
+                                self.set_reg(rd, pc);
+                                self.state.npc = target;
+                            }
+                            _ => return Err(CpuError::InvalidInstruction { opcode: instr as u64, pc: pc as u64 }),
+                        }
+                        self.state.g[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    3 => {
+                        // Format 3: Memory
+                        let rd = ((instr >> 25) & 0x1F) as usize;
+                        let op3 = (instr >> 19) & 0x3F;
+                        let rs1 = ((instr >> 14) & 0x1F) as usize;
+                        let i_bit = (instr & 0x00002000) != 0;
+                        let op2 = if i_bit {
+                            let simm13 = instr & 0x1FFF;
+                            if simm13 & 0x1000 != 0 {
+                                (simm13 | 0xFFFFE000) as i32 as u32
+                            } else {
+                                simm13
+                            }
+                        } else {
+                            let rs2 = (instr & 0x1F) as usize;
+                            self.get_reg(rs2)
+                        };
+                        let rs1_val = self.get_reg(rs1);
+                        let addr = rs1_val.wrapping_add(op2) as u64;
+
+                        match op3 {
+                            0x00 => {
+                                // LD / LDUW
+                                let val = bus.read_u32(addr, Endianness::BigEndian)?;
+                                self.set_reg(rd, val);
+                            }
+                            0x04 => {
+                                // ST / STW
+                                let val = self.get_reg(rd);
+                                bus.write_u32(addr, val, Endianness::BigEndian)?;
+                            }
+                            _ => return Err(CpuError::InvalidInstruction { opcode: instr as u64, pc: pc as u64 }),
+                        }
+                        self.state.g[0] = 0;
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    _ => Err(CpuError::InvalidInstruction { opcode: instr as u64, pc: pc as u64 }),
+                }
             }
         }
     }

@@ -119,6 +119,38 @@ impl CpuEngine for Ia64Cpu {
             return Ok(StepOutcome::Halted);
         }
 
+        // Breakpoint bundle (0x01)
+        if bundle[0] == 0x01 {
+            return Ok(StepOutcome::Breakpoint);
+        }
+
+        // Basic arithmetic in bundle
+        if bundle[0] == 0x02 {
+            let r1 = bundle[1] as usize;
+            let r2 = bundle[2] as usize;
+            let r3 = bundle[3] as usize;
+            if r1 < 128 && r2 < 128 && r3 < 128 && r1 != 0 {
+                self.state.gr[r1] = self.state.gr[r2].wrapping_add(self.state.gr[r3]);
+            }
+            self.state.gr[0] = 0;
+            self.state.pr |= 1;
+            return Ok(StepOutcome::Continue { cycles: 1 });
+        }
+
+        // Immediate load in bundle
+        if bundle[0] == 0x03 {
+            let r1 = bundle[1] as usize;
+            let mut imm_bytes = [0u8; 8];
+            imm_bytes.copy_from_slice(&bundle[2..10]);
+            let imm = u64::from_le_bytes(imm_bytes);
+            if r1 < 128 && r1 != 0 {
+                self.state.gr[r1] = imm;
+            }
+            self.state.gr[0] = 0;
+            self.state.pr |= 1;
+            return Ok(StepOutcome::Continue { cycles: 1 });
+        }
+
         // Generic execution outcome
         self.state.gr[0] = 0;
         self.state.pr |= 1; // p0 is always 1

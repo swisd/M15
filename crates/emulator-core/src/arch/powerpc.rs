@@ -117,30 +117,110 @@ impl CpuEngine for PowerPcCpu {
                 Ok(StepOutcome::Halted)
             }
             _ => {
-                // Check B / BL (Opcode 18 / 0x48000000)
-                if (instr & 0xFC000000) == 0x48000000 {
-                    let li = instr & 0x03FF_FFFC;
-                    let sign_ext = if li & 0x0200_0000 != 0 {
-                        li | 0xFC00_0000
-                    } else {
-                        li
-                    };
-                    let aa = (instr & 2) != 0;
-                    let lk = (instr & 1) != 0;
-                    if lk {
-                        self.state.lr = self.state.pc;
+                let op = (instr >> 26) & 0x3F;
+
+                match op {
+                    14 => {
+                        // ADDI rt, ra, imm
+                        let rt = ((instr >> 21) & 0x1F) as usize;
+                        let ra = ((instr >> 16) & 0x1F) as usize;
+                        let imm = (instr as i16) as i32 as u32;
+                        let ra_val = if ra == 0 { 0 } else { self.state.r[ra] };
+                        self.state.r[rt] = ra_val.wrapping_add(imm);
+                        Ok(StepOutcome::Continue { cycles: 1 })
                     }
-                    if aa {
-                        self.state.pc = sign_ext;
-                    } else {
-                        self.state.pc = (pc as i32).wrapping_add(sign_ext as i32) as u32;
+                    15 => {
+                        // ADDIS rt, ra, imm
+                        let rt = ((instr >> 21) & 0x1F) as usize;
+                        let ra = ((instr >> 16) & 0x1F) as usize;
+                        let imm = ((instr & 0xFFFF) as u32) << 16;
+                        let ra_val = if ra == 0 { 0 } else { self.state.r[ra] };
+                        self.state.r[rt] = ra_val.wrapping_add(imm);
+                        Ok(StepOutcome::Continue { cycles: 1 })
                     }
-                    Ok(StepOutcome::Continue { cycles: 2 })
-                } else {
-                    Err(CpuError::InvalidInstruction {
+                    24 => {
+                        // ORI ra, rs, imm
+                        let rs = ((instr >> 21) & 0x1F) as usize;
+                        let ra = ((instr >> 16) & 0x1F) as usize;
+                        let imm = (instr & 0xFFFF) as u32;
+                        self.state.r[ra] = self.state.r[rs] | imm;
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    31 => {
+                        let rt = ((instr >> 21) & 0x1F) as usize;
+                        let ra = ((instr >> 16) & 0x1F) as usize;
+                        let rb = ((instr >> 11) & 0x1F) as usize;
+                        let xo = (instr >> 1) & 0x3FF;
+                        match xo {
+                            266 => {
+                                // ADD rt, ra, rb
+                                self.state.r[rt] = self.state.r[ra].wrapping_add(self.state.r[rb]);
+                            }
+                            40 => {
+                                // SUBF rt, ra, rb (rt = rb - ra)
+                                self.state.r[rt] = self.state.r[rb].wrapping_sub(self.state.r[ra]);
+                            }
+                            28 => {
+                                // AND ra, rs, rb
+                                self.state.r[ra] = self.state.r[rt] & self.state.r[rb];
+                            }
+                            444 => {
+                                // OR ra, rs, rb
+                                self.state.r[ra] = self.state.r[rt] | self.state.r[rb];
+                            }
+                            316 => {
+                                // XOR ra, rs, rb
+                                self.state.r[ra] = self.state.r[rt] ^ self.state.r[rb];
+                            }
+                            _ => return Err(CpuError::InvalidInstruction { opcode: instr as u64, pc }),
+                        }
+                        Ok(StepOutcome::Continue { cycles: 1 })
+                    }
+                    32 => {
+                        // LWZ rt, d(ra)
+                        let rt = ((instr >> 21) & 0x1F) as usize;
+                        let ra = ((instr >> 16) & 0x1F) as usize;
+                        let d = (instr as i16) as i32 as u32;
+                        let ra_val = if ra == 0 { 0 } else { self.state.r[ra] };
+                        let addr = ra_val.wrapping_add(d) as u64;
+                        let val = bus.read_u32(addr, Endianness::BigEndian)?;
+                        self.state.r[rt] = val;
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    36 => {
+                        // STW rs, d(ra)
+                        let rs = ((instr >> 21) & 0x1F) as usize;
+                        let ra = ((instr >> 16) & 0x1F) as usize;
+                        let d = (instr as i16) as i32 as u32;
+                        let ra_val = if ra == 0 { 0 } else { self.state.r[ra] };
+                        let addr = ra_val.wrapping_add(d) as u64;
+                        bus.write_u32(addr, self.state.r[rs], Endianness::BigEndian)?;
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    18 => {
+                        // B / BL (Opcode 18)
+                        let li = instr & 0x03FF_FFFC;
+                        let sign_ext = if li & 0x0200_0000 != 0 {
+                            li | 0xFC00_0000
+                        } else {
+                            li
+                        };
+                        let aa = (instr & 2) != 0;
+                        let lk = (instr & 1) != 0;
+                        if lk {
+                            self.state.lr = self.state.pc;
+                        }
+                        if aa {
+                            self.state.pc = sign_ext;
+                        } else {
+                            self.state.pc = (pc as i32).wrapping_add(sign_ext as i32) as u32;
+                        }
+                        Ok(StepOutcome::Continue { cycles: 2 })
+                    }
+                    _ => Err(CpuError::InvalidInstruction {
                         opcode: instr as u64,
                         pc,
-                    })
+                    }),
                 }
             }
         }

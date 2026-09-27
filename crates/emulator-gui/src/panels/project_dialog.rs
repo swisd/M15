@@ -42,6 +42,9 @@ pub fn render_load_dialog(ctx: &egui::Context, app: &mut EmulatorApp) {
                         }
                     }
                 }
+                if ui.button("📁 Browse...").clicked() {
+                    app.file_browser.open_with_path(&app.load_path_input);
+                }
             });
 
             ui.add_space(4.0);
